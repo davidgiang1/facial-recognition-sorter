@@ -1,0 +1,10 @@
+/target
+/output
+/people
+/.claude
+/faces_db.bin
+/models
+/dumps
+/target_cache.bin
+/error.log
+/log.txt
