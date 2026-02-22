@@ -448,7 +448,7 @@ fn umeyama_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> [f32; 6] {
     src_var /= n;
 
     let num_cos = sxx + syy;
-    let num_sin = syx - sxy;
+    let num_sin = sxy - syx;
     let denom = (num_cos * num_cos + num_sin * num_sin).sqrt();
 
     if denom < 1e-10 || src_var < 1e-10 {
@@ -650,6 +650,60 @@ pub fn rotate_image(img: &DynamicImage, angle_rad: f32) -> DynamicImage {
     DynamicImage::ImageRgb8(output)
 }
 
+/// Score a set of detections for landmark quality. Higher = better.
+/// Detections with at least one plausible face rank far above all-implausible ones;
+/// within each tier, smaller eye-line tilt wins.
+fn detection_quality(dets: &[FaceDetection]) -> f32 {
+    // Find the "best" face in this set of detections
+    let best = dets.iter().max_by(|a, b| {
+        let plausible_a = landmarks_plausible(&a.landmarks);
+        let plausible_b = landmarks_plausible(&b.landmarks);
+        
+        // Base score: squared for emphasis on high confidence
+        let mut score_a = a.score * a.score;
+        let mut score_b = b.score * b.score;
+
+        // Apply penalty for implausible faces instead of hard rejection
+        // A penalty of 0.1 (in squared score space) allows strong tilted faces to win.
+        // e.g. 0.66^2 (0.43) - 0.1 = 0.33.  vs 0.52^2 (0.27). 
+        // 0.33 > 0.27, so the real face wins.
+        if !plausible_a { score_a -= 0.1; }
+        if !plausible_b { score_b -= 0.1; }
+        
+        // Minor penalty for tilt to break ties
+        let tilt_a = eye_line_angle(&a.landmarks).abs();
+        let tilt_b = eye_line_angle(&b.landmarks).abs();
+        
+        let metric_a = score_a - tilt_a * 0.05; 
+        let metric_b = score_b - tilt_b * 0.05;
+        
+        metric_a.partial_cmp(&metric_b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    match best {
+        Some(d) => {
+             let tilt = eye_line_angle(&d.landmarks).abs().to_degrees();
+             
+             // Return a metric based primarily on confidence.
+             // We barely penalize tilt here because `align_face` can fix tilt.
+             // We just want the rotation that gives the highest confidence face detection.
+             // Baseline: Score * 100.
+             // Tilt penalty: 0.1 per degree. (28 deg -> -2.8 score).
+             // This allows 0.66 (66) to beat 0.52 (52) easily.
+             let mut final_q = d.score * 100.0;
+             final_q -= tilt * 0.1;
+             
+             // Heavy penalty if face is still sideways relative to this rotation
+             if tilt > 60.0 {
+                 final_q -= 20.0;
+             }
+             
+             final_q
+        },
+        None => -999.0,
+    }
+}
+
 /// Pre-rotate the image by the negative of the detected eye-line tilt, then
 /// re-detect. Accepts the new detections only if landmark plausibility improves.
 /// Returns (best detections, Option<rotated image>).
@@ -659,35 +713,59 @@ pub fn correct_rotation(
     img: &DynamicImage,
     detections: Vec<FaceDetection>,
 ) -> (Vec<FaceDetection>, Option<DynamicImage>) {
-    if detections.is_empty() {
+    // 1. Calculate Initial Quality
+    let initial_quality = if detections.is_empty() { -999.0 } else { detection_quality(&detections) };
+    
+    // Quick exit: If faces are already PERFECT (Score > 0.8, Plausible, Tilt ~0), then skip.
+    // Quality metric: 100 + score*100 - tilt.
+    // Perfect score (0.9), tilt 0 => 190.
+    // False positive (0.5), tilt 0 => 150.
+    // So if quality > 180, we are very confident.
+    if initial_quality > 180.0 {
         return (detections, None);
     }
 
-    let needs_correction = detections.iter()
-        .any(|d| !landmarks_plausible(&d.landmarks));
-
-    if !needs_correction {
-        return (detections, None);
-    }
-
-    // Use the highest-confidence face's eye-line to guide the rotation angle
-    let best = detections.iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-    let tilt = eye_line_angle(&best.landmarks);
-
-    let rotated = rotate_image(img, -tilt);
-    let new_dets = match detector.detect(&rotated) {
-        Ok(d) if !d.is_empty() => d,
-        _ => return (detections, None),
+    // 2. Work on a "proxy" image for speed.
+    let (w, h) = img.dimensions();
+    let proxy_img = if w > 800 || h > 800 {
+        img.resize(800, 800, image::imageops::FilterType::Triangle)
+    } else {
+        img.clone()
     };
 
-    let old_bad = detections.iter().filter(|d| !landmarks_plausible(&d.landmarks)).count();
-    let new_bad = new_dets.iter().filter(|d| !landmarks_plausible(&d.landmarks)).count();
+    let mut best_angle = 0.0;
+    let mut best_score = initial_quality;
+    // We don't need to store `best_proxy_dets` because we will re-run on high-res anyway.
+    
+    // 3. Cardinal Scan Only
+    // 0 is already checked (initial_quality). Check 90, 180, 270.
+    let pi = std::f32::consts::PI;
+    let candidates = [pi / 2.0, -pi / 2.0, pi];
 
-    if new_bad < old_bad {
-        (new_dets, Some(rotated))
-    } else {
-        (detections, None)
+    for angle in candidates {
+        let rotated_proxy = rotate_image(&proxy_img, angle);
+        if let Ok(dets) = detector.detect(&rotated_proxy) {
+            let score = if dets.is_empty() { -999.0 } else { detection_quality(&dets) };
+            if score > best_score {
+                best_score = score;
+                best_angle = angle;
+            }
+        }
     }
+
+    // 4. Apply Final Result to Original High-Res Image
+    if best_angle.abs() > 1e-4 {
+        let final_rotated = rotate_image(img, best_angle);
+        if let Ok(final_dets) = detector.detect(&final_rotated) {
+             let final_q = if final_dets.is_empty() { -999.0 } else { detection_quality(&final_dets) };
+             
+             // Only accept if it's actually "plausible" (score > -50)
+             // or significantly better than the garbage we started with.
+             if final_q > -50.0 || final_q > initial_quality + 20.0 {
+                 return (final_dets, Some(final_rotated));
+             }
+        }
+    }
+
+    (detections, None)
 }
