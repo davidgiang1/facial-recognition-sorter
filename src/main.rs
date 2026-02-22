@@ -112,9 +112,10 @@ fn calculate_similarity(target: &PersonInfo, candidate: &PersonInfo) -> f32 {
 pub fn process_directory(
     input: PathBuf,
     target_dir: Option<PathBuf>,
-    dump_dir: Option<PathBuf>,
+    people_dir: Option<PathBuf>,
     match_threshold_min: f32,
     match_threshold_max: f32,
+    filter_threshold: f32,
     tx: std::sync::mpsc::Sender<UiMessage>,
 ) -> Result<()> {
     macro_rules! log {
@@ -160,10 +161,12 @@ pub fn process_directory(
         }
     }
 
-    // Build target_filesizes "already seen" filter from dump_dir (comprehensive collection)
-    if let Some(dd) = &dump_dir {
-        if dd.exists() {
-            for entry in WalkDir::new(dd).into_iter().filter_map(|e| e.ok()) {
+    // Build target_filesizes "already seen" filter from people directory
+    // This recursively scans all person subdirectories, excluding images already
+    // sorted into any person's folder (including siblings) from appearing in results.
+    if let Some(pd) = &people_dir {
+        if pd.exists() {
+            for entry in WalkDir::new(pd).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.is_file() {
                     let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -174,37 +177,7 @@ pub fn process_directory(
                 }
             }
         }
-        log!("Using dump directory for seen-filter: {}", dd.display());
-    }
-
-    // Also exclude photos from sibling reference directories (other people's reference photos)
-    if let Some(td) = &target_dir {
-        if let Some(parent) = td.parent() {
-            let mut sibling_count = 0usize;
-            if let Ok(siblings) = fs::read_dir(parent) {
-                for sibling in siblings.filter_map(|e| e.ok()) {
-                    let sibling_path = sibling.path();
-                    if sibling_path.is_dir() && sibling_path != *td {
-                        sibling_count += 1;
-                        if let Ok(entries) = fs::read_dir(&sibling_path) {
-                            for entry in entries.filter_map(|e| e.ok()) {
-                                let path = entry.path();
-                                if path.is_file() {
-                                    let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
-                                    if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-                                        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                                        target_filesizes.entry(file_size).or_default().push(path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if sibling_count > 0 {
-                log!("Auto-excluding photos from {} sibling directories.", sibling_count);
-            }
-        }
+        log!("Using people directory for seen-filter: {}", pd.display());
     }
 
     target_images_with_size.sort_by(|a, b| a.0.cmp(&b.0));
@@ -325,9 +298,8 @@ pub fn process_directory(
                  total_faces, max_neighbors);
 
             // Pass 3: Filter - Keep ONLY faces that match the centroid
-            // We use a slightly looser threshold (0.55) to include variations of the target,
-            // but strict enough to exclude random bystanders.
-            const FILTER_THRESHOLD: f32 = 0.55;
+            // Higher threshold = stricter, rejects more bystanders but may lose target variations.
+            log!("Using target rejection threshold: {:.2}", filter_threshold);
             
             let mut final_people = Vec::new();
             let mut rejected_count = 0;
@@ -339,17 +311,21 @@ pub fn process_directory(
             }
             let _ = fs::create_dir_all(&debug_dir);
 
+            let debug_rejected_dir = PathBuf::from("output").join("debug_rejected");
+            if debug_rejected_dir.exists() {
+                let _ = fs::remove_dir_all(&debug_rejected_dir);
+            }
+            let _ = fs::create_dir_all(&debug_rejected_dir);
+
             for (idx, candidate) in all_candidates.into_iter().enumerate() {
                 let sim = cosine_similarity(&candidate.face.face_embedding, &centroid_embedding);
-                
-                if sim > FILTER_THRESHOLD {
-                    // Save debug crop
-                    let (orig_path, _) = &target_images_with_size[candidate.image_idx];
-                    let stem = orig_path.file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| format!("face_{}", idx));
-                    
-                    // Add suffix if multiple faces from same image (rare after filtering, but possible)
+
+                let (orig_path, _) = &target_images_with_size[candidate.image_idx];
+                let stem = orig_path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("face_{}", idx));
+
+                if sim > filter_threshold {
                     let debug_path = debug_dir.join(format!("{}_face_{}.png", stem, idx));
                     let _ = candidate.face.debug_img.save(&debug_path);
 
@@ -359,6 +335,8 @@ pub fn process_directory(
                         face_embedding: candidate.face.face_embedding,
                     });
                 } else {
+                    let debug_path = debug_rejected_dir.join(format!("{}_face_{}_sim{:.3}.png", stem, idx, sim));
+                    let _ = candidate.face.debug_img.save(&debug_path);
                     rejected_count += 1;
                 }
             }
