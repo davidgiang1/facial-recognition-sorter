@@ -234,43 +234,44 @@ pub fn process_directory(
             }
 
             // Pass 1: detect all faces, extract embeddings
-            let mut per_image_candidates: Vec<Vec<TargetCandidate>> = Vec::new();
+            let per_image_candidates: Vec<Vec<TargetCandidate>> = target_images_with_size
+                .par_iter()
+                .map(|(query_path, _)| {
+                    if let Ok(img) = image::open(query_path) {
+                        let initial_dets = detector.detect(&img).unwrap_or_default();
+                        let (face_dets, rotated_img) = correct_rotation(&detector, &img, initial_dets);
+                        let alignment_img = rotated_img.as_ref().unwrap_or(&img);
 
-            for (query_path, _) in target_images_with_size.iter() {
-                if let Ok(img) = image::open(query_path) {
-                    let initial_dets = detector.detect(&img).unwrap_or_default();
-                    let (face_dets, rotated_img) = correct_rotation(&detector, &img, initial_dets);
-                    let alignment_img = rotated_img.as_ref().unwrap_or(&img);
-
-                    let mut candidates = Vec::new();
-                    for fd in face_dets {
-                        let face_crop = if fd.landmarks.len() == 5 {
-                            let lmks: [_; 5] = [
-                                fd.landmarks[0], fd.landmarks[1], fd.landmarks[2],
-                                fd.landmarks[3], fd.landmarks[4],
-                            ];
-                            align_face(alignment_img, &lmks)
-                        } else {
-                            let fx = fd.bbox[0].max(0.0) as u32;
-                            let fy = fd.bbox[1].max(0.0) as u32;
-                            let fw = (fd.bbox[2] - fd.bbox[0]).max(1.0) as u32;
-                            let fh = (fd.bbox[3] - fd.bbox[1]).max(1.0) as u32;
-                            alignment_img.crop_imm(fx, fy, fw, fh)
-                        };
-                        if let Ok(emb) = recognizer.recognize(&face_crop) {
-                            candidates.push(TargetCandidate {
-                                face_bbox: fd.bbox,
-                                face_score: fd.score,
-                                face_embedding: emb,
-                                debug_img: face_crop,
-                            });
+                        let mut candidates = Vec::new();
+                        for fd in face_dets {
+                            let face_crop = if fd.landmarks.len() == 5 {
+                                let lmks: [_; 5] = [
+                                    fd.landmarks[0], fd.landmarks[1], fd.landmarks[2],
+                                    fd.landmarks[3], fd.landmarks[4],
+                                ];
+                                align_face(alignment_img, &lmks)
+                            } else {
+                                let fx = fd.bbox[0].max(0.0) as u32;
+                                let fy = fd.bbox[1].max(0.0) as u32;
+                                let fw = (fd.bbox[2] - fd.bbox[0]).max(1.0) as u32;
+                                let fh = (fd.bbox[3] - fd.bbox[1]).max(1.0) as u32;
+                                alignment_img.crop_imm(fx, fy, fw, fh)
+                            };
+                            if let Ok(emb) = recognizer.recognize(&face_crop) {
+                                candidates.push(TargetCandidate {
+                                    face_bbox: fd.bbox,
+                                    face_score: fd.score,
+                                    face_embedding: emb,
+                                    debug_img: face_crop,
+                                });
+                            }
                         }
+                        candidates
+                    } else {
+                        Vec::new()
                     }
-                    per_image_candidates.push(candidates);
-                } else {
-                    per_image_candidates.push(Vec::new());
-                }
-            }
+                })
+                .collect();
 
             // Pass 2: Global Clustering to find the Dominant Identity
             // Instead of picking a "winner" per image, we pool ALL faces and find the largest cluster.
