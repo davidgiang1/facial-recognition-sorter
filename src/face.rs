@@ -654,21 +654,53 @@ pub fn rotate_image(img: &DynamicImage, angle_rad: f32) -> DynamicImage {
 /// Detections with at least one plausible face rank far above all-implausible ones;
 /// within each tier, smaller eye-line tilt wins.
 fn detection_quality(dets: &[FaceDetection]) -> f32 {
-    let plausible_min_tilt = dets.iter()
-        .filter(|d| landmarks_plausible(&d.landmarks))
-        .map(|d| eye_line_angle(&d.landmarks).abs())
-        .fold(f32::MAX, f32::min);
+    // Find the "best" face in this set of detections
+    let best = dets.iter().max_by(|a, b| {
+        let plausible_a = landmarks_plausible(&a.landmarks);
+        let plausible_b = landmarks_plausible(&b.landmarks);
+        
+        // Base score: squared for emphasis on high confidence
+        let mut score_a = a.score * a.score;
+        let mut score_b = b.score * b.score;
 
-    if plausible_min_tilt < f32::MAX {
-        // Has at least one plausible face — prefer smaller remaining tilt
-        100.0 - plausible_min_tilt.to_degrees()
-    } else {
-        // All implausible — prefer the least-bad tilt as a tie-breaker
-        let min_tilt = dets.iter()
-            .filter(|d| d.landmarks.len() >= 2)
-            .map(|d| eye_line_angle(&d.landmarks).abs())
-            .fold(f32::MAX, f32::min);
-        -min_tilt.to_degrees()
+        // Apply penalty for implausible faces instead of hard rejection
+        // A penalty of 0.1 (in squared score space) allows strong tilted faces to win.
+        // e.g. 0.66^2 (0.43) - 0.1 = 0.33.  vs 0.52^2 (0.27). 
+        // 0.33 > 0.27, so the real face wins.
+        if !plausible_a { score_a -= 0.1; }
+        if !plausible_b { score_b -= 0.1; }
+        
+        // Minor penalty for tilt to break ties
+        let tilt_a = eye_line_angle(&a.landmarks).abs();
+        let tilt_b = eye_line_angle(&b.landmarks).abs();
+        
+        let metric_a = score_a - tilt_a * 0.05; 
+        let metric_b = score_b - tilt_b * 0.05;
+        
+        metric_a.partial_cmp(&metric_b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    match best {
+        Some(d) => {
+             let tilt = eye_line_angle(&d.landmarks).abs().to_degrees();
+             
+             // Return a metric based primarily on confidence.
+             // We barely penalize tilt here because `align_face` can fix tilt.
+             // We just want the rotation that gives the highest confidence face detection.
+             // Baseline: Score * 100.
+             // Tilt penalty: 0.1 per degree. (28 deg -> -2.8 score).
+             // This allows 0.66 (66) to beat 0.52 (52) easily.
+             let mut final_q = d.score * 100.0;
+             final_q -= tilt * 0.1;
+             
+             // Heavy penalty if face is still sideways relative to this rotation
+             if tilt > 60.0 {
+                 final_q -= 20.0;
+             }
+             
+             final_q
+        },
+        None => -999.0,
     }
 }
 
@@ -684,8 +716,12 @@ pub fn correct_rotation(
     // 1. Calculate Initial Quality
     let initial_quality = if detections.is_empty() { -999.0 } else { detection_quality(&detections) };
     
-    // Quick exit: If faces are already upright (quality > 50), don't waste time rotating.
-    if initial_quality > 50.0 {
+    // Quick exit: If faces are already PERFECT (Score > 0.8, Plausible, Tilt ~0), then skip.
+    // Quality metric: 100 + score*100 - tilt.
+    // Perfect score (0.9), tilt 0 => 190.
+    // False positive (0.5), tilt 0 => 150.
+    // So if quality > 180, we are very confident.
+    if initial_quality > 180.0 {
         return (detections, None);
     }
 
