@@ -448,7 +448,7 @@ fn umeyama_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> [f32; 6] {
     src_var /= n;
 
     let num_cos = sxx + syy;
-    let num_sin = syx - sxy;
+    let num_sin = sxy - syx;
     let denom = (num_cos * num_cos + num_sin * num_sin).sqrt();
 
     if denom < 1e-10 || src_var < 1e-10 {

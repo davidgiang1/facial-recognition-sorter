@@ -8,8 +8,8 @@
 /dumps
 /people
 /models
-/faces_db.bin
-/faces_db.json
+/faces_db*.bin
+/faces_db*.json
 /target_cache.bin
 
 # Logs and temporary files
