@@ -316,10 +316,10 @@ pub fn process_directory(
             // Find the centroid (face with max neighbors)
             // If multiple faces have the same max count, picking the first one is fine as they are likely similar.
             let (best_idx, max_neighbors) = neighbor_counts.iter().enumerate()
-                .max_by_key(|(_, &count)| count)
+                .max_by_key(|&(_, &count)| count)
                 .unwrap();
             
-            let centroid = &all_candidates[best_idx].face;
+            let centroid_embedding = all_candidates[best_idx].face.face_embedding.clone();
             log!("Identified dominant identity from {} total faces (centroid has {} neighbors).", 
                  total_faces, max_neighbors);
 
@@ -339,7 +339,7 @@ pub fn process_directory(
             let _ = fs::create_dir_all(&debug_dir);
 
             for (idx, candidate) in all_candidates.into_iter().enumerate() {
-                let sim = cosine_similarity(&candidate.face.face_embedding, &centroid.face_embedding);
+                let sim = cosine_similarity(&candidate.face.face_embedding, &centroid_embedding);
                 
                 if sim > FILTER_THRESHOLD {
                     // Save debug crop
