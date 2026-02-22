@@ -46,6 +46,7 @@ pub struct FaceSearchApp {
     target_dir: Option<PathBuf>,
     match_threshold_min: f32,
     match_threshold: f32,
+    filter_threshold: f32,
     page_size: usize,
     thumbnail_size: f32,
     current_page: usize,
@@ -59,7 +60,10 @@ pub struct FaceSearchApp {
     matched_images_cache: Vec<(PathBuf, f32, bool, Option<Result<egui::TextureHandle, String>>)>,
     last_selected_index: Option<usize>,
     show_copy_confirm: bool,
-    show_dump_confirm: bool,
+    show_rebuild_confirm: bool,
+    show_new_person_modal: bool,
+    new_person_name: String,
+    new_person_image_path: Option<PathBuf>,
 
     // Log history for display during processing
     log_messages: Vec<String>,
@@ -87,6 +91,7 @@ impl Default for FaceSearchApp {
             target_dir: settings.target_dir,
             match_threshold_min: 0.0,
             match_threshold: 0.65,
+            filter_threshold: 0.55,
             page_size: 100,
             thumbnail_size: 200.0,
             current_page: 0,
@@ -98,18 +103,16 @@ impl Default for FaceSearchApp {
             matched_images_cache: Vec::new(),
             last_selected_index: None,
             show_copy_confirm: false,
-            show_dump_confirm: false,
+            show_rebuild_confirm: false,
+            show_new_person_modal: false,
+            new_person_name: String::new(),
+            new_person_image_path: None,
             log_messages: Vec::new(),
             scroll_to_top: false,
             tx,
             rx,
         }
     }
-}
-
-fn derive_dump_dir(target_dir: &PathBuf) -> PathBuf {
-    let person_name = target_dir.file_name().unwrap_or_default().to_string_lossy();
-    PathBuf::from("dumps").join(person_name.as_ref())
 }
 
 fn get_unique_path(dir: &std::path::Path, file_name: &std::ffi::OsStr) -> PathBuf {
@@ -268,7 +271,13 @@ impl eframe::App for FaceSearchApp {
             // --- Target Directory Input ---
             ui.horizontal(|ui| {
                 if ui.button("Select Target Person Directory").clicked() {
-                    if let Some(path) = FileDialog::new().pick_folder() {
+                    let start_dir = self.target_dir.as_ref()
+                        .and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                    let mut dialog = FileDialog::new();
+                    if let Some(sd) = &start_dir {
+                        dialog = dialog.set_directory(sd);
+                    }
+                    if let Some(path) = dialog.pick_folder() {
                         self.target_dir = Some(path);
                         self.update_target_count();
                         self.save_settings();
@@ -322,7 +331,17 @@ impl eframe::App for FaceSearchApp {
                             .suffix(" px"),
                     );
                 });
-                ui.label("(Lower = stricter. Results within the range are shown, ranked best-match-first.)");
+                ui.horizontal(|ui| {
+                    ui.label("Target rejection:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.filter_threshold)
+                            .range(0.0..=1.0)
+                            .speed(0.01)
+                            .fixed_decimals(2)
+                    );
+                    ui.label("(Higher = stricter. Faces below this similarity to the dominant identity are rejected as bystanders.)");
+                });
+                ui.label("(Lower distance = stricter. Results within the range are shown, ranked best-match-first.)");
             }
 
             ui.separator();
@@ -341,13 +360,14 @@ impl eframe::App for FaceSearchApp {
                         let tx_clone = self.tx.clone();
                         let input = self.input_dir.clone().unwrap();
                         let target_dir = self.target_dir.clone();
-                        let dump_dir = Some(PathBuf::from("dumps"));
+                        let people_dir = target_dir.as_ref().and_then(|td| td.parent().map(|p| p.to_path_buf()));
                         let threshold_min = self.match_threshold_min.min(self.match_threshold);
                         let threshold_max = self.match_threshold;
+                        let filter_threshold = self.filter_threshold;
 
                         thread::spawn(move || {
                             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                crate::process_directory(input, target_dir, dump_dir, threshold_min, threshold_max, tx_clone.clone())
+                                crate::process_directory(input, target_dir, people_dir, threshold_min, threshold_max, filter_threshold, tx_clone.clone())
                             }));
                             match result {
                                 Ok(Err(e)) => {
@@ -368,15 +388,7 @@ impl eframe::App for FaceSearchApp {
                         });
                     }
                     if ui.button("Rebuild Database").clicked() {
-                        let db_path = std::path::Path::new(crate::DB_FILE);
-                        if db_path.exists() {
-                            let _ = std::fs::remove_file(db_path);
-                        }
-                        let db_json_path = std::path::Path::new(crate::DB_FILE_JSON);
-                        if db_json_path.exists() {
-                            let _ = std::fs::remove_file(db_json_path);
-                        }
-                        self.status_msg = "Database deleted. Click 'Start Processing' to rebuild from scratch.".to_string();
+                        self.show_rebuild_confirm = true;
                     }
                 });
             });
@@ -390,9 +402,6 @@ impl eframe::App for FaceSearchApp {
                     if selected_count > 0 {
                         if ui.button(format!("Copy {} Selected to Target Directory", selected_count)).clicked() {
                             self.show_copy_confirm = true;
-                        }
-                        if ui.button(format!("Copy {} Selected to Dump", selected_count)).clicked() {
-                            self.show_dump_confirm = true;
                         }
                     }
                     if ui.button("Export All to Output Folder").clicked() {
@@ -418,6 +427,12 @@ impl eframe::App for FaceSearchApp {
                         let debug_dir = PathBuf::from("output").join("debug_targets");
                         if debug_dir.exists() {
                             let _ = std::process::Command::new("explorer").arg(&debug_dir).spawn();
+                        }
+                    }
+                    if ui.button("Open Debug Rejected").clicked() {
+                        let rejected_dir = PathBuf::from("output").join("debug_rejected");
+                        if rejected_dir.exists() {
+                            let _ = std::process::Command::new("explorer").arg(&rejected_dir).spawn();
                         }
                     }
                 }
@@ -491,8 +506,6 @@ impl eframe::App for FaceSearchApp {
 
                 if do_copy {
                     let target_dest = self.target_dir.clone().unwrap();
-                    let dump_dest = derive_dump_dir(&target_dest);
-                    let _ = std::fs::create_dir_all(&dump_dest);
                     let mut copy_count = 0;
                     for (path, _, selected, _) in &self.matched_images_cache {
                         if *selected {
@@ -501,10 +514,6 @@ impl eframe::App for FaceSearchApp {
                                 if std::fs::copy(path, &destination).is_ok() {
                                     copy_count += 1;
                                 }
-                                
-                                // Also copy to dump (comprehensive collection)
-                                let dump_destination = get_unique_path(&dump_dest, file_name);
-                                let _ = std::fs::copy(path, &dump_destination);
                             }
                         }
                     }
@@ -517,15 +526,13 @@ impl eframe::App for FaceSearchApp {
                     self.all_ranked_matches.retain(|(p, _)| !removed.contains(p));
                     self.matched_images_cache.retain(|(_, _, s, _)| !*s);
 
-                    // If current page is now empty, go back one page
-                    if self.matched_images_cache.is_empty() && self.current_page > 0 {
-                        let prev = self.current_page - 1;
-                        self.load_page(prev);
-                    }
+                    // Reload: if current page is now past the end, go back one page
+                    let max_page = if self.all_ranked_matches.is_empty() { 0 } else { self.total_pages() - 1 };
+                    let reload_page = self.current_page.min(max_page);
+                    self.load_page(reload_page);
 
                     self.status_msg = format!("Successfully copied {} images to Target Directory!", copy_count);
                     self.update_target_count();
-                    self.last_selected_index = None;
                     self.show_copy_confirm = false;
                 }
                 if do_cancel {
@@ -533,113 +540,148 @@ impl eframe::App for FaceSearchApp {
                 }
             }
 
-            // --- Dump Confirmation Modal ---
-            if self.show_dump_confirm {
-                let selected_indices: Vec<usize> = self.matched_images_cache.iter()
-                    .enumerate()
-                    .filter(|(_, (_, _, s, _))| *s)
-                    .map(|(i, _)| i)
-                    .collect();
+            // --- Rebuild Database Confirmation Modal ---
+            if self.show_rebuild_confirm {
+                let mut do_rebuild = false;
+                let mut do_cancel = false;
 
-                let mut do_dump = false;
-                let mut do_cancel_dump = false;
-
-                egui::Window::new("Confirm Dump Copy")
+                egui::Window::new("Confirm Rebuild Database")
                     .collapsible(false)
-                    .resizable(true)
-                    .default_size([600.0, 450.0])
+                    .resizable(false)
+                    .default_size([450.0, 150.0])
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        let dump_path = self.target_dir.as_ref()
-                            .map(|td| derive_dump_dir(td).display().to_string())
-                            .unwrap_or_default();
-                        ui.heading(format!("Copy {} selected photo(s) to dump?", selected_indices.len()));
-                        ui.label(egui::RichText::new(format!("→ {}", dump_path)).monospace().weak());
+                        ui.heading("Are you sure?");
                         ui.separator();
-
-                        let cell_size = 100.0_f32;
-                        let available_w = ui.available_width();
-                        let cols = ((available_w / cell_size).floor() as usize).max(1);
-
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            egui::Grid::new("dump_confirm_preview_grid")
-                                .num_columns(cols)
-                                .spacing([4.0, 4.0])
-                                .show(ui, |ui| {
-                                    for (col_i, &idx) in selected_indices.iter().enumerate() {
-                                        let (img_path, _, _, texture_res_opt) = &self.matched_images_cache[idx];
-                                        match texture_res_opt {
-                                            Some(Ok(texture)) => {
-                                                let image = egui::Image::new(&*texture)
-                                                    .fit_to_exact_size(egui::vec2(88.0, 88.0))
-                                                    .maintain_aspect_ratio(true);
-                                                ui.add(image);
-                                            }
-                                            Some(Err(_)) => {
-                                                ui.add_sized([88.0, 88.0], egui::Label::new("⚠ Error"));
-                                            }
-                                            None => {
-                                                ui.add_sized([88.0, 88.0], egui::Label::new(img_path.file_name()
-                                                    .map(|n| n.to_string_lossy().to_string())
-                                                    .unwrap_or_default()));
-                                            }
-                                        }
-                                        if (col_i + 1) % cols == 0 {
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                        });
-
+                        ui.label("This will delete the face database (faces_db.bin and faces_db.json).");
+                        ui.label("All images will need to be re-processed from scratch on the next run.");
+                        ui.label(
+                            egui::RichText::new("This cannot be undone.")
+                                .color(egui::Color32::from_rgb(220, 80, 80))
+                                .strong()
+                        );
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("✔ Confirm Dump").color(egui::Color32::from_rgb(80, 200, 100))).clicked() {
-                                do_dump = true;
+                            if ui.button(
+                                egui::RichText::new("Confirm Rebuild")
+                                    .color(egui::Color32::from_rgb(220, 80, 80))
+                            ).clicked() {
+                                do_rebuild = true;
                             }
                             ui.add_space(12.0);
-                            if ui.button(egui::RichText::new("✖ Cancel").color(egui::Color32::from_rgb(220, 80, 80))).clicked() {
-                                do_cancel_dump = true;
+                            if ui.button("Cancel").clicked() {
+                                do_cancel = true;
                             }
                         });
                     });
 
-                if do_dump {
-                    if let Some(target_dest) = &self.target_dir.clone() {
-                        let dump_dest = derive_dump_dir(target_dest);
-                        let _ = std::fs::create_dir_all(&dump_dest);
-                        let mut copy_count = 0;
-                        for (path, _, selected, _) in &self.matched_images_cache {
-                            if *selected {
-                                if let Some(file_name) = path.file_name() {
-                                    let dump_destination = get_unique_path(&dump_dest, file_name);
-                                    if std::fs::copy(path, &dump_destination).is_ok() {
-                                        copy_count += 1;
-                                    }
-                                }
+                if do_rebuild {
+                    let db_path = std::path::Path::new(crate::DB_FILE);
+                    if db_path.exists() {
+                        let _ = std::fs::remove_file(db_path);
+                    }
+                    let db_json_path = std::path::Path::new(crate::DB_FILE_JSON);
+                    if db_json_path.exists() {
+                        let _ = std::fs::remove_file(db_json_path);
+                    }
+                    self.status_msg = "Database deleted. Click 'Start Processing' to rebuild from scratch.".to_string();
+                    self.show_rebuild_confirm = false;
+                }
+                if do_cancel {
+                    self.show_rebuild_confirm = false;
+                }
+            }
+
+            // --- New Person Modal ---
+            if self.show_new_person_modal {
+                let mut do_create = false;
+                let mut do_cancel = false;
+
+                let people_dir = self.target_dir.as_ref()
+                    .and_then(|td| td.parent().map(|p| p.to_path_buf()));
+
+                egui::Window::new("Create New Person")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_size([400.0, 200.0])
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.heading("Create a new person directory");
+                        ui.separator();
+
+                        if let Some(pd) = &people_dir {
+                            ui.label(format!("Parent: {}", pd.display()));
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("Person name:");
+                            ui.text_edit_singleline(&mut self.new_person_name);
+                        });
+
+                        let name_trimmed = self.new_person_name.trim();
+                        let is_valid = !name_trimmed.is_empty()
+                            && !name_trimmed.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']);
+                        let already_exists = people_dir.as_ref()
+                            .map(|pd| pd.join(name_trimmed).exists())
+                            .unwrap_or(false);
+
+                        if !name_trimmed.is_empty() && !is_valid {
+                            ui.colored_label(egui::Color32::from_rgb(220, 80, 80),
+                                "Name contains invalid characters.");
+                        }
+                        if already_exists {
+                            ui.colored_label(egui::Color32::from_rgb(220, 180, 0),
+                                "Directory already exists. Image will be added to it.");
+                        }
+
+                        if let Some(img_path) = &self.new_person_image_path {
+                            ui.label(format!("Image: {}", img_path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()));
+                        }
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            let can_create = is_valid && people_dir.is_some();
+                            if ui.add_enabled(can_create,
+                                egui::Button::new(
+                                    egui::RichText::new("Create + Copy")
+                                        .color(egui::Color32::from_rgb(80, 200, 100))
+                                )).clicked() {
+                                do_create = true;
+                            }
+                            ui.add_space(12.0);
+                            if ui.button(
+                                egui::RichText::new("Cancel")
+                                    .color(egui::Color32::from_rgb(220, 80, 80))
+                            ).clicked() {
+                                do_cancel = true;
+                            }
+                        });
+                    });
+
+                if do_create {
+                    if let (Some(people_dir), Some(img_path)) = (people_dir, &self.new_person_image_path.clone()) {
+                        let person_dir = people_dir.join(self.new_person_name.trim());
+                        let _ = std::fs::create_dir_all(&person_dir);
+                        if let Some(file_name) = img_path.file_name() {
+                            let dest = get_unique_path(&person_dir, file_name);
+                            if std::fs::copy(img_path, &dest).is_ok() {
+                                self.status_msg = format!(
+                                    "Created '{}' and copied image.",
+                                    self.new_person_name.trim()
+                                );
+                            } else {
+                                self.status_msg = "Failed to copy image.".to_string();
                             }
                         }
-
-                        // Remove dumped items from master ranked list
-                        let removed: HashSet<PathBuf> = self.matched_images_cache.iter()
-                            .filter(|(_, _, s, _)| *s)
-                            .map(|(p, _, _, _)| p.clone())
-                            .collect();
-                        self.all_ranked_matches.retain(|(p, _)| !removed.contains(p));
-                        self.matched_images_cache.retain(|(_, _, s, _)| !*s);
-
-                        // If current page is now empty, go back one page
-                        if self.matched_images_cache.is_empty() && self.current_page > 0 {
-                            let prev = self.current_page - 1;
-                            self.load_page(prev);
-                        }
-
-                        self.status_msg = format!("Successfully copied {} images to Dump!", copy_count);
-                        self.last_selected_index = None;
                     }
-                    self.show_dump_confirm = false;
+                    self.show_new_person_modal = false;
+                    self.new_person_image_path = None;
                 }
-                if do_cancel_dump {
-                    self.show_dump_confirm = false;
+                if do_cancel {
+                    self.show_new_person_modal = false;
+                    self.new_person_image_path = None;
                 }
             }
 
@@ -730,6 +772,7 @@ impl eframe::App for FaceSearchApp {
                 let available_width = ui.available_width();
                 let columns = ((available_width / cell_size).floor() as usize).max(1);
                 let mut clicked_idx: Option<usize> = None;
+                let mut new_person_trigger: Option<PathBuf> = None;
 
                 let mut scroll_area = egui::ScrollArea::vertical();
                 if self.scroll_to_top {
@@ -805,6 +848,18 @@ impl eframe::App for FaceSearchApp {
                                         }
                                         ui.close_menu();
                                     }
+                                    ui.separator();
+                                    let has_people_dir = self.target_dir.as_ref()
+                                        .and_then(|td| td.parent())
+                                        .is_some();
+                                    if has_people_dir {
+                                        if ui.button("➕ Create New Person + Add Image").clicked() {
+                                            new_person_trigger = Some(img_path.clone());
+                                            ui.close_menu();
+                                        }
+                                    } else {
+                                        ui.add_enabled(false, egui::Button::new("➕ Create New Person (set target dir first)"));
+                                    }
                                 });
 
                                 if (idx + 1) % columns == 0 {
@@ -830,6 +885,13 @@ impl eframe::App for FaceSearchApp {
                         self.matched_images_cache[idx].2 = !self.matched_images_cache[idx].2;
                     }
                     self.last_selected_index = Some(idx);
+                }
+
+                // Handle "Create New Person" trigger from context menu
+                if let Some(path) = new_person_trigger {
+                    self.new_person_image_path = Some(path);
+                    self.new_person_name.clear();
+                    self.show_new_person_modal = true;
                 }
             }
         });
