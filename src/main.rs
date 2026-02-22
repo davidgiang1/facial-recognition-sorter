@@ -272,98 +272,109 @@ pub fn process_directory(
                 }
             }
 
-            // Pass 2+3: score by cross-image support, select winner per image
-            const CROSS_SIM_THRESHOLD: f32 = 0.6;
-            let n_images = per_image_candidates.len();
-
-            struct ExtractedPerson {
+            // Pass 2: Global Clustering to find the Dominant Identity
+            // Instead of picking a "winner" per image, we pool ALL faces and find the largest cluster.
+            // This is robust against images that contain ONLY bystanders (which would be false positives otherwise).
+            
+            // Flatten per_image_candidates into a flat list, but keep track of source image index
+            struct FlatCandidate {
                 image_idx: usize,
-                info: PersonInfo,
-                debug_img: image::DynamicImage,
-            }
-            let mut all_people: Vec<ExtractedPerson> = Vec::new();
-
-            for img_idx in 0..n_images {
-                let candidates = &per_image_candidates[img_idx];
-                if candidates.is_empty() { continue; }
-
-                let winner_idx = if n_images == 1 {
-                    // Only 1 image — no cross-comparison possible, fall back to largest face
-                    candidates.iter().enumerate()
-                        .max_by(|(_, a), (_, b)| {
-                            let aa = (a.face_bbox[2] - a.face_bbox[0]) * (a.face_bbox[3] - a.face_bbox[1]);
-                            let ab = (b.face_bbox[2] - b.face_bbox[0]) * (b.face_bbox[3] - b.face_bbox[1]);
-                            aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0)
-                } else {
-                    let scores: Vec<usize> = candidates.iter().map(|c| {
-                        (0..n_images)
-                            .filter(|&j| j != img_idx)
-                            .filter(|&j| {
-                                per_image_candidates[j].iter().any(|other| {
-                                    let sim = cosine_similarity(&c.face_embedding, &other.face_embedding);
-                                    sim > CROSS_SIM_THRESHOLD
-                                })
-                            })
-                            .count()
-                    }).collect();
-
-                    let max_score = *scores.iter().max().unwrap_or(&0);
-                    // Tiebreak: largest face box area
-                    scores.iter().enumerate()
-                        .filter(|&(_, s)| *s == max_score)
-                        .max_by(|(ia, _), (ib, _)| {
-                            let area = |i: usize| {
-                                let b = candidates[i].face_bbox;
-                                (b[2] - b[0]) * (b[3] - b[1])
-                            };
-                            area(*ia).partial_cmp(&area(*ib)).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0)
-                };
-
-                let winner = &per_image_candidates[img_idx][winner_idx];
-
-                all_people.push(ExtractedPerson {
-                    image_idx: img_idx,
-                    info: PersonInfo {
-                        face_bbox: winner.face_bbox,
-                        face_score: winner.face_score,
-                        face_embedding: winner.face_embedding.clone(),
-                    },
-                    debug_img: winner.debug_img.clone(),
-                });
+                face: TargetCandidate,
             }
 
-            if all_people.is_empty() {
+            let mut all_candidates: Vec<FlatCandidate> = Vec::new();
+            for (idx, candidates) in per_image_candidates.into_iter().enumerate() {
+                for c in candidates {
+                    all_candidates.push(FlatCandidate { image_idx: idx, face: c });
+                }
+            }
+
+            let total_faces = all_candidates.len();
+
+            if total_faces == 0 {
                 anyhow::bail!("Could not detect any faces in the provided target images.");
             }
 
-            log!("Extracted {} faces from {} images. Saving debug crops...",
-                 all_people.len(), target_images_with_size.len());
+            // Calculate "neighbor count" for every face
+            // A face has a neighbor if similarity > 0.6
+            // The face with the most neighbors is the "Centroid".
+            let mut neighbor_counts = vec![0; total_faces];
+            const CLUSTER_SIM_THRESHOLD: f32 = 0.6;
 
+            // Only parallelize the outer loop if we have many faces (n^2 complexity)
+            // For < 1000 faces, single thread is instant.
+            for i in 0..total_faces {
+                for j in 0..total_faces {
+                    if i == j { continue; }
+                    let sim = cosine_similarity(&all_candidates[i].face.face_embedding, &all_candidates[j].face.face_embedding);
+                    if sim > CLUSTER_SIM_THRESHOLD {
+                        neighbor_counts[i] += 1;
+                    }
+                }
+            }
+
+            // Find the centroid (face with max neighbors)
+            // If multiple faces have the same max count, picking the first one is fine as they are likely similar.
+            let (best_idx, max_neighbors) = neighbor_counts.iter().enumerate()
+                .max_by_key(|(_, &count)| count)
+                .unwrap();
+            
+            let centroid = &all_candidates[best_idx].face;
+            log!("Identified dominant identity from {} total faces (centroid has {} neighbors).", 
+                 total_faces, max_neighbors);
+
+            // Pass 3: Filter - Keep ONLY faces that match the centroid
+            // We use a slightly looser threshold (0.55) to include variations of the target,
+            // but strict enough to exclude random bystanders.
+            const FILTER_THRESHOLD: f32 = 0.55;
+            
+            let mut final_people = Vec::new();
+            let mut rejected_count = 0;
+
+            // Prepare debug output
             let debug_dir = PathBuf::from("output").join("debug_targets");
             if debug_dir.exists() {
                 let _ = fs::remove_dir_all(&debug_dir);
             }
             let _ = fs::create_dir_all(&debug_dir);
 
-            for (idx, p) in all_people.iter().enumerate() {
-                let (orig_path, _) = &target_images_with_size[p.image_idx];
-                let stem = orig_path.file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| format!("face_{}", idx));
-                let debug_path = debug_dir.join(format!("{}_face.png", stem));
-                let _ = p.debug_img.save(&debug_path);
+            for (idx, candidate) in all_candidates.into_iter().enumerate() {
+                let sim = cosine_similarity(&candidate.face.face_embedding, &centroid.face_embedding);
+                
+                if sim > FILTER_THRESHOLD {
+                    // Save debug crop
+                    let (orig_path, _) = &target_images_with_size[candidate.image_idx];
+                    let stem = orig_path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("face_{}", idx));
+                    
+                    // Add suffix if multiple faces from same image (rare after filtering, but possible)
+                    let debug_path = debug_dir.join(format!("{}_face_{}.png", stem, idx));
+                    let _ = candidate.face.debug_img.save(&debug_path);
+
+                    final_people.push(PersonInfo {
+                        face_bbox: candidate.face.face_bbox,
+                        face_score: candidate.face.face_score,
+                        face_embedding: candidate.face.face_embedding,
+                    });
+                } else {
+                    rejected_count += 1;
+                }
             }
 
-            let all_infos: Vec<PersonInfo> = all_people.into_iter().map(|p| p.info).collect();
-            let original_count = all_infos.len();
+            log!("Kept {} faces matching the dominant identity. Rejected {} bystanders/outliers.", 
+                 final_people.len(), rejected_count);
+
+            if final_people.is_empty() {
+                // If we filtered everything (including the centroid itself?), something is wrong.
+                // But centroid always matches itself with sim=1.0, so final_people cannot be empty.
+                anyhow::bail!("Clustering logic error: Dominant identity lost during filtering.");
+            }
+
+            // Deduplicate
+            let original_count = final_people.len();
             let mut deduped: Vec<PersonInfo> = Vec::new();
-            for info in all_infos {
+            for info in final_people {
                 let is_dup = deduped.iter().any(|existing| {
                     cosine_similarity(&existing.face_embedding, &info.face_embedding) > 0.95
                 });
@@ -376,6 +387,7 @@ pub fn process_directory(
                 log!("Pruned {} near-duplicate faces from target gallery.", pruned);
             }
             query_people = deduped;
+
             save_target_cache(&TargetCache { hash: current_hash, entries: query_people.clone() });
         }
     }
