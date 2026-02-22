@@ -681,18 +681,15 @@ pub fn correct_rotation(
     img: &DynamicImage,
     detections: Vec<FaceDetection>,
 ) -> (Vec<FaceDetection>, Option<DynamicImage>) {
-    // 1. Quick exit if we have perfect results already
-    if detections.is_empty() {
-        return (detections, None);
-    }
-    let initial_quality = detection_quality(&detections);
-    if initial_quality > 98.0 {
+    // 1. Calculate Initial Quality
+    let initial_quality = if detections.is_empty() { -999.0 } else { detection_quality(&detections) };
+    
+    // Quick exit: If faces are already upright (quality > 50), don't waste time rotating.
+    if initial_quality > 50.0 {
         return (detections, None);
     }
 
-    // 2. Work on a "proxy" image to make rotation search cheap.
-    // Rotating a 4K image 5 times is slow. Rotating an 800px image is fast.
-    // SCRFD resizes to 640x640 anyway, so we lose no detection accuracy.
+    // 2. Work on a "proxy" image for speed.
     let (w, h) = img.dimensions();
     let proxy_img = if w > 800 || h > 800 {
         img.resize(800, 800, image::imageops::FilterType::Triangle)
@@ -701,71 +698,36 @@ pub fn correct_rotation(
     };
 
     let mut best_angle = 0.0;
-    let mut best_score = -999.0; // Start lower than any possible score
-    let mut best_proxy_dets = Vec::new();
+    let mut best_score = initial_quality;
+    // We don't need to store `best_proxy_dets` because we will re-run on high-res anyway.
     
-    // 3. Determine Search Candidates
-    let mut candidates = Vec::new();
-    candidates.push(0.0);
+    // 3. Cardinal Scan Only
+    // 0 is already checked (initial_quality). Check 90, 180, 270.
+    let pi = std::f32::consts::PI;
+    let candidates = [pi / 2.0, -pi / 2.0, pi];
 
-    let has_plausible = detections.iter().any(|d| landmarks_plausible(&d.landmarks));
-    
-    if has_plausible {
-        // Smart Search: We have a face, just fix its tilt.
-        // Check exact correction +/- 5 degrees to handle estimation noise.
-        if let Some(primary) = detections.iter().max_by_key(|d| ((d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1])) as i32) {
-             let tilt = eye_line_angle(&primary.landmarks);
-             let correction = -tilt;
-             candidates.push(correction);
-             candidates.push(correction - 0.087); // -5 deg
-             candidates.push(correction + 0.087); // +5 deg
-        }
-    } else {
-        // Blind Search: Face is likely upside down or sideways. Check Cardinals.
-        let pi = std::f32::consts::PI;
-        candidates.push(pi / 2.0);
-        candidates.push(-pi / 2.0);
-        candidates.push(pi);
-    }
-
-    // 4. Run Search on Proxy
     for angle in candidates {
         let rotated_proxy = rotate_image(&proxy_img, angle);
         if let Ok(dets) = detector.detect(&rotated_proxy) {
-            // Even if empty, we check (score will be low)
             let score = if dets.is_empty() { -999.0 } else { detection_quality(&dets) };
             if score > best_score {
                 best_score = score;
                 best_angle = angle;
-                best_proxy_dets = dets;
             }
         }
     }
 
-    // 5. Refinement (Optimization)
-    // If we picked a cardinal direction (or even a rough tilt), we can do one final 
-    // micro-adjustment based on the detections *at that angle* to get 0.00° tilt.
-    if !best_proxy_dets.is_empty() && best_score > -100.0 {
-        if let Some(primary) = best_proxy_dets.iter().max_by_key(|d| ((d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1])) as i32) {
-             let residual_tilt = eye_line_angle(&primary.landmarks);
-             // If significant residual tilt, correct it
-             if residual_tilt.abs() > 0.017 { // > 1 degree
-                 best_angle -= residual_tilt;
-             }
-        }
-    }
-
-    // 6. Apply Final Result to Original High-Res Image
-    // Only return if we actually improved over the baseline
+    // 4. Apply Final Result to Original High-Res Image
     if best_angle.abs() > 1e-4 {
         let final_rotated = rotate_image(img, best_angle);
         if let Ok(final_dets) = detector.detect(&final_rotated) {
-            let final_q = if final_dets.is_empty() { -999.0 } else { detection_quality(&final_dets) };
-            
-            // Accept if better, or if we rescued an implausible face
-            if final_q > initial_quality || (!has_plausible && final_q > -100.0) {
+             let final_q = if final_dets.is_empty() { -999.0 } else { detection_quality(&final_dets) };
+             
+             // Only accept if it's actually "plausible" (score > -50)
+             // or significantly better than the garbage we started with.
+             if final_q > -50.0 || final_q > initial_quality + 20.0 {
                  return (final_dets, Some(final_rotated));
-            }
+             }
         }
     }
 
