@@ -1,11 +1,40 @@
+# Build artifacts
 /target
+/dist
+/Output
+
+# Application data & outputs
 /output
-/people
-/.claude
-/faces_db.bin
-/models
 /dumps
+/people
+/models
+/faces_db.bin
+/faces_db.json
 /target_cache.bin
+
+# Logs and temporary files
 /error.log
 /log.txt
 /yolov8n.pt
+*.log
+
+# Packaging
+*.zip
+*.7z
+*.rar
+facial-recognition-sorter-v*.zip
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor/IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+.gemini/
+setup.iss
