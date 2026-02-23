@@ -1,5 +1,6 @@
 mod face;
 mod gui;
+mod utils;
 
 use anyhow::Result;
 use face::{FaceDetector, FaceRecognizer, align_face, correct_rotation};
@@ -149,12 +150,9 @@ pub fn process_directory(
             if let Ok(entries) = fs::read_dir(td) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() {
-                        let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
-                        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-                            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                            target_images_with_size.push((path.clone(), file_size));
-                        }
+                    if path.is_file() && crate::utils::is_image(&path) {
+                        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        target_images_with_size.push((path.clone(), file_size));
                     }
                 }
             }
@@ -168,12 +166,9 @@ pub fn process_directory(
         if pd.exists() {
             for entry in WalkDir::new(pd).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
-                if path.is_file() {
-                    let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
-                    if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-                        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                        target_filesizes.entry(file_size).or_default().push(path.to_path_buf());
-                    }
+                if path.is_file() && (crate::utils::is_image(path) || crate::utils::is_video(path)) {
+                    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    target_filesizes.entry(file_size).or_default().push(path.to_path_buf());
                 }
             }
         }
@@ -210,7 +205,7 @@ pub fn process_directory(
             let per_image_candidates: Vec<Vec<TargetCandidate>> = target_images_with_size
                 .par_iter()
                 .map(|(query_path, _)| {
-                    if let Ok(img) = image::open(query_path) {
+                    if let Ok(img) = crate::utils::load_image_robustly(query_path) {
                         let initial_dets = detector.detect(&img).unwrap_or_default();
                         let (face_dets, rotated_img) = correct_rotation(&detector, &img, initial_dets);
                         let alignment_img = rotated_img.as_ref().unwrap_or(&img);
@@ -371,39 +366,56 @@ pub fn process_directory(
         }
     }
 
-    log!("Scanning directory for images...");
-    let image_paths: Vec<PathBuf> = WalkDir::new(&input)
+    log!("Scanning directory for files...");
+    let all_paths: Vec<PathBuf> = WalkDir::new(&input)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| {
-                    let ext = ext.to_string_lossy().to_lowercase();
-                    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp")
-                })
-                .unwrap_or(false)
+            crate::utils::is_image(e.path()) || crate::utils::is_video(e.path())
         })
         .map(|e| e.path().to_path_buf())
         .collect();
 
-    if image_paths.is_empty() {
-        anyhow::bail!("No images found in input directory.");
+    if all_paths.is_empty() {
+        anyhow::bail!("No images or videos found in input directory.");
     }
 
     let mut db = load_database();
-    let to_process: Vec<PathBuf> = image_paths
-        .into_iter()
-        .filter(|p| !db.images.contains_key(&p.to_string_lossy().to_string()))
-        .collect();
+    log!("Database loaded: {} entries cached", db.images.len());
 
-    if !to_process.is_empty() {
-        log!("Extracting faces from {} new images...", to_process.len());
+    // Filter out already processed files, but KEEP videos that are missing thumbnails
+    let mut images_to_process = Vec::new();
+    let mut videos_to_process = Vec::new();
+    let mut backfill_count = 0usize;
+
+    for p in all_paths {
+        let path_str = p.to_string_lossy().to_string();
+        let is_video = crate::utils::is_video(&p);
+
+        if !db.images.contains_key(&path_str) {
+            if is_video {
+                videos_to_process.push(p);
+            } else {
+                images_to_process.push(p);
+            }
+        } else if is_video {
+            // Smart Backfill: If video is in DB but missing thumbnail, re-process it
+            let thumb_path = crate::utils::get_video_thumbnail_path(&p);
+            if !thumb_path.exists() {
+                videos_to_process.push(p);
+                backfill_count += 1;
+            }
+        }
+    }
+
+    // --- Process Images ---
+    if !images_to_process.is_empty() {
+        log!("Extracting faces from {} new images...", images_to_process.len());
 
         let db_arc = Arc::new(Mutex::new(db));
         let batch_size = 50;
-        let batches: Vec<Vec<PathBuf>> = to_process.chunks(batch_size)
+        let batches: Vec<Vec<PathBuf>> = images_to_process.chunks(batch_size)
             .map(|c| c.to_vec())
             .collect();
         let total_batches = batches.len();
@@ -427,12 +439,31 @@ pub fn process_directory(
 
         std::thread::scope(|s| {
             // --- Producer thread: parallel decode + preprocess on CPU ---
-            s.spawn(|| {
+            let db_arc3 = Arc::clone(&db_arc);
+            s.spawn(move || {
                 for (batch_idx, batch) in batches.into_iter().enumerate() {
+                    // Record files that fail to decode so they aren't retried every run
+                    let failed_paths: Vec<String> = batch
+                        .par_iter()
+                        .filter_map(|path| {
+                            match crate::utils::load_image_robustly(path) {
+                                Ok(_) => None,
+                                Err(_) => Some(path.to_string_lossy().to_string()),
+                            }
+                        })
+                        .collect();
+
+                    if !failed_paths.is_empty() {
+                        let mut db_guard = db_arc3.lock().unwrap();
+                        for path in failed_paths {
+                            db_guard.images.entry(path).or_insert_with(Vec::new);
+                        }
+                    }
+
                     let decoded: DecodedBatch = batch
                         .par_iter()
                         .filter_map(|path| {
-                            let img = image::open(path).ok()?;
+                            let img = crate::utils::load_image_robustly(path).ok()?;
                             let face_pre = crate::face::FaceDetector::preprocess_image(&img);
                             Some((path.to_string_lossy().to_string(), img, face_pre))
                         })
@@ -555,7 +586,176 @@ pub fn process_directory(
         drop(db_arc2);
         db = Arc::try_unwrap(db_arc).unwrap().into_inner().unwrap();
     } else {
-        log!("No new images to process (database up to date).");
+        log!("No new images to process.");
+    }
+
+    // --- Process Videos ---
+    if !videos_to_process.is_empty() {
+        if let Some(ffmpeg_cmd) = crate::utils::find_ffmpeg_path() {
+            log!("Processing {} videos ({} new, {} backfill thumbnails) using {:?}...",
+                videos_to_process.len(),
+                videos_to_process.len() - backfill_count,
+                backfill_count,
+                ffmpeg_cmd);
+
+            // Ensure thumbnail cache dir exists
+            let thumb_dir = PathBuf::from("output").join("thumbnails");
+            let _ = std::fs::create_dir_all(&thumb_dir);
+
+            let db_arc = Arc::new(Mutex::new(db));
+            let total_videos = videos_to_process.len();
+
+            for (i, video_path) in videos_to_process.iter().enumerate() {
+            let msg = format!("Processing video {}/{}: {}", i + 1, total_videos, video_path.file_name().unwrap_or_default().to_string_lossy());
+            let _ = tx.send(UiMessage::Log(msg.clone()));
+            println!("{}", msg);
+
+            // 1. Create temp dir
+            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let temp_dir = std::env::temp_dir().join(format!("fr_video_{}_{}", std::process::id(), timestamp));
+            if let Err(e) = std::fs::create_dir(&temp_dir) {
+                log!("Failed to create temp dir: {}", e);
+                continue;
+            }
+
+            // 2. Extract frames using ffmpeg
+            let output_pattern = temp_dir.join("frame_%04d.jpg");
+            let status = std::process::Command::new(&ffmpeg_cmd)
+                .arg("-i")
+                .arg(video_path)
+                .arg("-vf")
+                .arg("fps=1")
+                .arg(&output_pattern)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {
+                    // 3. Collect frames
+                    let frames: Vec<PathBuf> = WalkDir::new(&temp_dir)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| crate::utils::is_image(e.path()))
+                        .map(|e| e.path().to_path_buf())
+                        .collect();
+
+                    if !frames.is_empty() {
+                        // 4. Process frames (parallel)
+                        let det_ref = &detector;
+                        let rec_ref = &recognizer;
+                        
+                        let frame_results: Vec<(Vec<PersonInfo>, PathBuf)> = frames.par_iter()
+                            .filter_map(|frame_path| {
+                                if let Ok(img) = crate::utils::load_image_robustly(frame_path) {
+                                    let dets = det_ref.detect(&img).unwrap_or_default();
+                                    let (dets, rotated) = correct_rotation(det_ref, &img, dets);
+                                    let align_img = rotated.as_ref().unwrap_or(&img);
+
+                                    let mut frame_faces = Vec::new();
+                                    for fd in dets {
+                                        let crop = if fd.landmarks.len() == 5 {
+                                            let lmks = [fd.landmarks[0], fd.landmarks[1], fd.landmarks[2], fd.landmarks[3], fd.landmarks[4]];
+                                            align_face(align_img, &lmks)
+                                        } else {
+                                            align_img.crop_imm(
+                                                fd.bbox[0].max(0.0) as u32,
+                                                fd.bbox[1].max(0.0) as u32,
+                                                (fd.bbox[2]-fd.bbox[0]).max(1.0) as u32,
+                                                (fd.bbox[3]-fd.bbox[1]).max(1.0) as u32
+                                            )
+                                        };
+
+                                        if let Ok(emb) = rec_ref.recognize(&crop) {
+                                            frame_faces.push(PersonInfo {
+                                                face_bbox: fd.bbox,
+                                                face_score: fd.score,
+                                                face_embedding: emb,
+                                            });
+                                        }
+                                    }
+                                    Some((frame_faces, frame_path.clone()))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        // Flatten and find the best overall frame for thumbnail caching
+                        let mut all_faces = Vec::new();
+                        let mut best_score = -1.0;
+                        let mut best_frame_path: Option<PathBuf> = None;
+
+                        for (faces, path) in &frame_results {
+                            for f in faces {
+                                if f.face_score > best_score {
+                                    best_score = f.face_score;
+                                    best_frame_path = Some(path.clone());
+                                }
+                                all_faces.push(f.clone());
+                            }
+                        }
+
+                        // Save best thumbnail
+                        if let Some(best_path) = best_frame_path {
+                            let thumb_path = crate::utils::get_video_thumbnail_path(video_path);
+                            if let Err(e) = std::fs::copy(&best_path, &thumb_path) {
+                                eprintln!("Warning: failed to save video thumbnail: {}", e);
+                            }
+                        }
+
+                        // 5. Aggregate: Sort by score, dedupe, keep top 5
+                        let mut sorted_faces = all_faces;
+                        sorted_faces.sort_by(|a, b| b.face_score.partial_cmp(&a.face_score).unwrap_or(std::cmp::Ordering::Equal));
+
+                        let mut final_faces = Vec::new();
+                        for face in sorted_faces {
+                            if final_faces.len() >= 5 { break; }
+                            
+                            // Deduplicate based on embedding similarity (> 0.8)
+                            let is_dup = final_faces.iter().any(|existing: &PersonInfo| {
+                                cosine_similarity(&existing.face_embedding, &face.face_embedding) > 0.8
+                            });
+                            
+                            if !is_dup {
+                                final_faces.push(face);
+                            }
+                        }
+
+                        {
+                            let mut db_guard = db_arc.lock().unwrap();
+                            db_guard.images.insert(video_path.to_string_lossy().to_string(), final_faces);
+                            let _ = save_database(&mut *db_guard);
+                        }
+                    } else {
+                        // No frames or no faces — still record in DB so it's not retried
+                        let mut db_guard = db_arc.lock().unwrap();
+                        db_guard.images.entry(video_path.to_string_lossy().to_string()).or_insert_with(Vec::new);
+                        let _ = save_database(&mut *db_guard);
+                    }
+                }
+                _ => {
+                    log!("FFmpeg failed or not found for video: {}", video_path.display());
+                    // Still record in DB so it's not retried every run
+                    let mut db_guard = db_arc.lock().unwrap();
+                    db_guard.images.entry(video_path.to_string_lossy().to_string()).or_insert_with(Vec::new);
+                }
+            }
+
+            // Ensure thumbnail marker exists so backfill doesn't re-trigger
+            let thumb_path = crate::utils::get_video_thumbnail_path(video_path);
+            if !thumb_path.exists() {
+                let _ = std::fs::File::create(&thumb_path);
+            }
+
+            // Cleanup
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            }
+        
+            db = Arc::try_unwrap(db_arc).unwrap().into_inner().unwrap();
+        }
+    } else {
+        log!("No new videos to process.");
     }
 
     let processed_count = AtomicUsize::new(0);
