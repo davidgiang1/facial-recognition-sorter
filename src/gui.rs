@@ -91,9 +91,9 @@ impl Default for FaceSearchApp {
             target_dir: settings.target_dir,
             match_threshold_min: 0.0,
             match_threshold: 0.65,
-            filter_threshold: 0.55,
+            filter_threshold: 0.2,
             page_size: 100,
-            thumbnail_size: 200.0,
+            thumbnail_size: 300.0,
             current_page: 0,
             is_processing: false,
             status_msg: "Ready".to_string(),
@@ -120,7 +120,7 @@ fn get_unique_path(dir: &std::path::Path, file_name: &std::ffi::OsStr) -> PathBu
     let mut counter = 1;
     let stem = std::path::Path::new(file_name).file_stem().unwrap_or_default().to_string_lossy();
     let ext = std::path::Path::new(file_name).extension().unwrap_or_default().to_string_lossy();
-    
+
     while path.exists() {
         let new_name = if ext.is_empty() {
             format!("{}_{}", stem, counter)
@@ -155,11 +155,8 @@ impl FaceSearchApp {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() {
-                        let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
-                        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-                            self.target_count += 1;
-                        }
+                    if path.is_file() && crate::utils::is_image(&path) {
+                        self.target_count += 1;
                     }
                 }
             }
@@ -736,34 +733,28 @@ impl eframe::App for FaceSearchApp {
                 // Pre-load any textures that haven't been loaded yet
                 for (_img_path, _dist, _selected, texture_res_opt) in self.matched_images_cache.iter_mut() {
                     if texture_res_opt.is_none() {
-                        if let Ok(mut bytes) = std::fs::read(&*_img_path) {
-                            let mut img_result = image::load_from_memory(&bytes);
-                            if img_result.is_err() {
-                                if bytes.len() > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
-                                    bytes.push(0xFF);
-                                    bytes.push(0xD9);
-                                    bytes.extend(std::iter::repeat(0).take(1024));
-                                    img_result = image::load_from_memory(&bytes);
-                                }
-                            }
-                            match img_result {
-                                Ok(img) => {
-                                    let size = [img.width() as usize, img.height() as usize];
-                                    let image_buffer = img.to_rgba8();
-                                    let pixels = image_buffer.as_flat_samples();
-                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-                                    *texture_res_opt = Some(Ok(ctx.load_texture(
-                                        _img_path.display().to_string(),
-                                        color_image,
-                                        egui::TextureOptions::LINEAR,
-                                    )));
-                                }
-                                Err(e) => {
-                                    *texture_res_opt = Some(Err(e.to_string()));
-                                }
-                            }
+                        let path = &*_img_path;
+                        let load_path = if crate::utils::is_video(path) {
+                            crate::utils::get_video_thumbnail_path(path)
                         } else {
-                            *texture_res_opt = Some(Err("Could not read file bytes".to_string()));
+                            path.to_path_buf()
+                        };
+
+                        match crate::utils::load_image_robustly(&load_path) {
+                            Ok(img) => {
+                                let size = [img.width() as usize, img.height() as usize];
+                                let image_buffer = img.to_rgba8();
+                                let pixels = image_buffer.as_flat_samples();
+                                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                                *texture_res_opt = Some(Ok(ctx.load_texture(
+                                    _img_path.display().to_string(),
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                )));
+                            }
+                            Err(e) => {
+                                *texture_res_opt = Some(Err(e.to_string()));
+                            }
                         }
                     }
                 }
@@ -819,6 +810,30 @@ impl eframe::App for FaceSearchApp {
                                             ui.spinner()
                                         }
                                     };
+                                    // Paint video icon if applicable
+                                    if crate::utils::is_video(img_path) {
+                                        let icon_pos = egui::pos2(
+                                            img_resp.rect.right() - 4.0,
+                                            img_resp.rect.top() + 4.0,
+                                        );
+                                        // Draw a semi-transparent background for the icon
+                                        ui.painter().rect_filled(
+                                            egui::Rect::from_min_size(
+                                                egui::pos2(img_resp.rect.right() - 24.0, img_resp.rect.top() + 4.0),
+                                                egui::vec2(20.0, 20.0)
+                                            ),
+                                            4.0,
+                                            egui::Color32::from_black_alpha(128),
+                                        );
+                                        ui.painter().text(
+                                            icon_pos,
+                                            egui::Align2::RIGHT_TOP,
+                                            "🎬",
+                                            egui::FontId::proportional(14.0),
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
+
                                     // Paint distance as an overlay on the image so it doesn't
                                     // add any layout height/width to the cell.
                                     let text = format!("d={:.3}", dist);
