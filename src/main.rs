@@ -810,14 +810,14 @@ pub fn process_directory(
                 let source_path = Path::new(path_str.as_str());
                 if !source_path.exists() { return None; }
 
-                // Deduplication logic removed to prevent confusing users testing with identical files
-                /*
+                // Deduplication logic: Filter out images already sorted into the people directory
                 let mut is_duplicate = false;
                 if let Ok(metadata) = source_path.metadata() {
                     let size = metadata.len();
                     if let Some(target_paths) = target_filesizes.get(&size) {
                         if let Ok(source_bytes) = fs::read(source_path) {
                             for target_path in target_paths {
+                                // Skip if it's literally the same file path (to allow testing with the target folder inside input)
                                 let c_source = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
                                 let c_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
                                 if c_source == c_target { continue; }
@@ -833,7 +833,6 @@ pub fn process_directory(
                     }
                 }
                 if is_duplicate { return None; }
-                */
 
                 processed_count.fetch_add(1, Ordering::Relaxed);
 
