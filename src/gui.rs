@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::collections::HashSet;
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Serialize, Deserialize, Default)]
 struct AppSettings {
     input_dir: Option<PathBuf>,
@@ -244,7 +246,7 @@ impl eframe::App for FaceSearchApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Facial Recognition Sorter");
+            ui.heading(format!("Facial Recognition Sorter v{}", APP_VERSION));
             ui.separator();
 
             // --- Directories Input ---

@@ -1,7 +1,6 @@
 # Build artifacts
 /target
 /dist
-/Output
 
 # Application data & outputs
 /output
@@ -22,7 +21,6 @@
 *.zip
 *.7z
 *.rar
-facial-recognition-sorter-v*.zip
 
 # OS generated files
 .DS_Store
@@ -38,6 +36,5 @@ Desktop.ini
 .claude/
 .gemini/
 /installer_output/
-/ico/
 settings.json
 test_dir.rs

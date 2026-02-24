@@ -1,33 +1,57 @@
+#define MyAppName "Facial Recognition Sorter"
+#define MyAppVersion "0.1.0"
+#define MyAppPublisher "David Giang"
+#define MyAppExeName "facial-recognition-sorter.exe"
+#define MyAppURL "https://github.com/davidgiang1/facial-recognition-sorter"
+#define FRS_SIGN_CMD GetEnv("FRS_SIGN_CMD")
+
 [Setup]
-AppName=Facial Recognition Sorter
-AppVersion=0.1.0
-DefaultDirName={autopf}\Facial Recognition Sorter
-DefaultGroupName=Facial Recognition Sorter
+AppId={{A2D2AC9A-DC20-421E-ACAC-71A4F1886D87}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}/issues
+AppUpdatesURL={#MyAppURL}/releases
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+DisableProgramGroupPage=yes
+PrivilegesRequired=admin
 OutputDir=installer_output
 OutputBaseFilename=Facial-Recognition-Sorter-Setup
 SetupIconFile=res\app_icon.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Installer
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
+WizardStyle=modern
+
+#if FRS_SIGN_CMD != ""
+SignTool=frssig {#FRS_SIGN_CMD} $f
+SignedUninstaller=yes
+#endif
 
 [Files]
-Source: "target\release\facial-recognition-sorter.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "models\det.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "models\rec.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
 ; If ort places DLLs in the release folder, they will be bundled.
 Source: "target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\Facial Recognition Sorter"; Filename: "{app}\facial-recognition-sorter.exe"
-Name: "{commondesktop}\Facial Recognition Sorter"; Filename: "{app}\facial-recognition-sorter.exe"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{userappdata}\Facial Recognition Sorter"
 
 [Code]
 function IsAppRunning(const FileName: String): Boolean;
@@ -49,7 +73,7 @@ end;
 function InitializeUninstall(): Boolean;
 begin
   Result := True;
-  while IsAppRunning('facial-recognition-sorter.exe') do
+  while IsAppRunning('{#MyAppExeName}') do
   begin
     if MsgBox('Facial Recognition Sorter is still running. Please close the application before proceeding with the uninstallation.', mbInformation, MB_RETRYCANCEL) = IDCANCEL then
     begin

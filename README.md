@@ -10,7 +10,7 @@ Given a folder of **target reference images** (photos of the person you are look
 
 To use the application without any technical setup, follow these steps:
 
-1. **Download the Installer:** Go to the [Releases](https://github.com/opensource/facial-recognition-sorter/releases) page and download the latest `Facial-Recognition-Sorter-Setup.exe`.
+1. **Download the Installer:** Go to the [Releases](https://github.com/davidgiang1/facial-recognition-sorter/releases) page and download the latest `Facial-Recognition-Sorter-Setup.exe`.
 2. **Install:** Double-click the downloaded setup file to install the application to your computer.
 3. **Run:** Open "Facial Recognition Sorter" from your Start Menu.
 
@@ -44,3 +44,11 @@ The application uses DirectML, which works on most modern Windows GPUs (NVIDIA, 
 ## Development & Technical Details
 
 Are you a developer interested in how this application is built, its architecture, or how to compile it from source? Please refer to the [DEVELOPMENT.md](DEVELOPMENT.md) guide.
+
+For release packaging, installer signing, and icon quality checks, use [RELEASE.md](RELEASE.md).
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

@@ -890,6 +890,7 @@ pub fn process_directory(
 }
 
 fn main() -> eframe::Result {
+    let app_title = format!("Facial Recognition Sorter v{}", env!("CARGO_PKG_VERSION"));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([600.0, 400.0])
@@ -898,7 +899,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "Facial Recognition Sorter",
+        &app_title,
         options,
         Box::new(|cc| Ok(Box::new(FaceSearchApp::new(cc)))),
     )
