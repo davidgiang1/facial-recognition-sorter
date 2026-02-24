@@ -360,7 +360,14 @@ impl eframe::App for FaceSearchApp {
                         let tx_clone = self.tx.clone();
                         let input = self.input_dir.clone().unwrap();
                         let target_dir = self.target_dir.clone();
-                        let people_dir = target_dir.as_ref().and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                        let people_dir = target_dir.as_ref().and_then(|td| {
+                            let p = td.parent()?;
+                            if p.file_name().unwrap_or_default() == "people" {
+                                Some(p.to_path_buf())
+                            } else {
+                                None
+                            }
+                        });
                         let threshold_min = self.match_threshold_min.min(self.match_threshold);
                         let threshold_max = self.match_threshold;
                         let filter_threshold = self.filter_threshold;
@@ -597,8 +604,14 @@ impl eframe::App for FaceSearchApp {
                 let mut do_create = false;
                 let mut do_cancel = false;
 
-                let people_dir = self.target_dir.as_ref()
-                    .and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                let people_dir = self.target_dir.as_ref().and_then(|td| {
+                    let p = td.parent()?;
+                    if p.file_name().unwrap_or_default() == "people" {
+                        Some(p.to_path_buf())
+                    } else {
+                        None
+                    }
+                });
 
                 egui::Window::new("Create New Person")
                     .collapsible(false)
@@ -868,7 +881,14 @@ impl eframe::App for FaceSearchApp {
                                     }
                                     ui.separator();
                                     let has_people_dir = self.target_dir.as_ref()
-                                        .and_then(|td| td.parent())
+                                        .and_then(|td| {
+                                            let p = td.parent()?;
+                                            if p.file_name().unwrap_or_default() == "people" {
+                                                Some(())
+                                            } else {
+                                                None
+                                            }
+                                        })
                                         .is_some();
                                     if has_people_dir {
                                         if ui.button("➕ Create New Person + Add Image").clicked() {
