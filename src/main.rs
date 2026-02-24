@@ -408,13 +408,13 @@ pub fn process_directory(
             let mut rejected_count = 0;
 
             // Prepare debug output
-            let debug_dir = PathBuf::from("output").join("debug_targets");
+            let debug_dir = crate::get_app_data_dir().join("output").join("debug_targets");
             if debug_dir.exists() {
                 let _ = fs::remove_dir_all(&debug_dir);
             }
             let _ = fs::create_dir_all(&debug_dir);
 
-            let debug_rejected_dir = PathBuf::from("output").join("debug_rejected");
+            let debug_rejected_dir = crate::get_app_data_dir().join("output").join("debug_rejected");
             if debug_rejected_dir.exists() {
                 let _ = fs::remove_dir_all(&debug_rejected_dir);
             }

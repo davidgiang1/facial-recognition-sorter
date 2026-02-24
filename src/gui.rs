@@ -405,7 +405,7 @@ impl eframe::App for FaceSearchApp {
                         }
                     }
                     if ui.button("Export All to Output Folder").clicked() {
-                        let out_dir = PathBuf::from("output").join("target_matches");
+                        let out_dir = crate::get_app_data_dir().join("output").join("target_matches");
                         let _ = std::fs::create_dir_all(&out_dir);
                         for (src_path, _) in &self.all_ranked_matches {
                             if let Some(name) = src_path.file_name() {
@@ -418,19 +418,19 @@ impl eframe::App for FaceSearchApp {
                         self.status_msg = format!("Exported {} candidates to output folder.", self.all_ranked_matches.len());
                     }
                     if ui.button("Open Output Folder").clicked() {
-                        let output = PathBuf::from("output").join("target_matches");
+                        let output = crate::get_app_data_dir().join("output").join("target_matches");
                         if output.exists() {
                             let _ = std::process::Command::new("explorer").arg(&output).spawn();
                         }
                     }
                     if ui.button("Open Debug Targets").clicked() {
-                        let debug_dir = PathBuf::from("output").join("debug_targets");
+                        let debug_dir = crate::get_app_data_dir().join("output").join("debug_targets");
                         if debug_dir.exists() {
                             let _ = std::process::Command::new("explorer").arg(&debug_dir).spawn();
                         }
                     }
                     if ui.button("Open Debug Rejected").clicked() {
-                        let rejected_dir = PathBuf::from("output").join("debug_rejected");
+                        let rejected_dir = crate::get_app_data_dir().join("output").join("debug_rejected");
                         if rejected_dir.exists() {
                             let _ = std::process::Command::new("explorer").arg(&rejected_dir).spawn();
                         }
