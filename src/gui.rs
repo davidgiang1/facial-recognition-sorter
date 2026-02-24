@@ -16,7 +16,7 @@ struct AppSettings {
 
 impl AppSettings {
     fn load() -> Self {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "davidgiang", "facial-recognition-sorter") {
+        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
             let config_dir = proj_dirs.config_dir();
             let config_path = config_dir.join("settings.json");
             if let Ok(data) = fs::read_to_string(config_path) {
@@ -29,7 +29,7 @@ impl AppSettings {
     }
 
     fn save(&self) {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "davidgiang", "facial-recognition-sorter") {
+        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
             let config_dir = proj_dirs.config_dir();
             if fs::create_dir_all(config_dir).is_ok() {
                 let config_path = config_dir.join("settings.json");
