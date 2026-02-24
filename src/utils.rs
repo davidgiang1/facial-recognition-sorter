@@ -96,5 +96,5 @@ pub fn get_video_thumbnail_path(video_path: &Path) -> PathBuf {
     video_path.to_string_lossy().hash(&mut hasher);
     let hash = hasher.finish();
     
-    crate::get_app_data_dir().join("thumbnails").join(format!("{:x}.jpg", hash))
+    crate::get_app_data_dir().join("output").join("thumbnails").join(format!("{:x}.jpg", hash))
 }
