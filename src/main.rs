@@ -766,8 +766,14 @@ pub fn process_directory(
         log!("Gallery matching with {} target faces...", query_people.len());
 
         let input_prefix = input.to_string_lossy().to_string().to_lowercase();
+        let input_clean = if input_prefix.starts_with(r#"\\?\"#) { &input_prefix[4..] } else { &input_prefix };
+        
         let relevant_images: Vec<(&String, &Vec<PersonInfo>)> = db.images.iter()
-            .filter(|(path_str, _)| path_str.to_lowercase().starts_with(&input_prefix))
+            .filter(|(path_str, _)| {
+                let p = path_str.to_lowercase();
+                let p_clean = if p.starts_with(r#"\\?\"#) { &p[4..] } else { &p };
+                p_clean.starts_with(input_clean)
+            })
             .collect();
 
         log!("Searching for target across {} images...", relevant_images.len());
@@ -779,13 +785,18 @@ pub fn process_directory(
                 let source_path = Path::new(path_str.as_str());
                 if !source_path.exists() { return None; }
 
+                // Deduplication logic removed to prevent confusing users testing with identical files
+                /*
                 let mut is_duplicate = false;
                 if let Ok(metadata) = source_path.metadata() {
                     let size = metadata.len();
                     if let Some(target_paths) = target_filesizes.get(&size) {
                         if let Ok(source_bytes) = fs::read(source_path) {
                             for target_path in target_paths {
-                                if source_path == target_path { continue; }
+                                let c_source = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+                                let c_target = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
+                                if c_source == c_target { continue; }
+                                
                                 if let Ok(target_bytes) = fs::read(target_path) {
                                     if source_bytes == target_bytes {
                                         is_duplicate = true;
@@ -797,6 +808,7 @@ pub fn process_directory(
                     }
                 }
                 if is_duplicate { return None; }
+                */
 
                 processed_count.fetch_add(1, Ordering::Relaxed);
 
