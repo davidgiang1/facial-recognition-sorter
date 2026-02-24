@@ -226,7 +226,11 @@ pub fn process_directory(
     }
 
     log!("Loading ONNX models...");
-    let models_dir = PathBuf::from("models");
+    let models_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("models");
 
     // NOTE: FP16 variants are preferred if available (run quantize_models.py to generate)
     let det_path = models_dir.join("det.onnx"); // Keep FP32 for biometric accuracy
