@@ -55,7 +55,8 @@ pub struct FaceSearchApp {
 
     // Stats and Matches state
     processed_count: usize,
-    target_count: usize,
+    target_image_count: usize,
+    target_video_count: usize,
     all_ranked_matches: Vec<(PathBuf, f32)>,
     matched_images_cache: Vec<(PathBuf, f32, bool, Option<Result<egui::TextureHandle, String>>)>,
     last_selected_index: Option<usize>,
@@ -98,7 +99,8 @@ impl Default for FaceSearchApp {
             is_processing: false,
             status_msg: "Ready".to_string(),
             processed_count: 0,
-            target_count: 0,
+            target_image_count: 0,
+            target_video_count: 0,
             all_ranked_matches: Vec::new(),
             matched_images_cache: Vec::new(),
             last_selected_index: None,
@@ -150,13 +152,18 @@ impl FaceSearchApp {
     }
 
     fn update_target_count(&mut self) {
-        self.target_count = 0;
+        self.target_image_count = 0;
+        self.target_video_count = 0;
         if let Some(dir) = &self.target_dir {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() && crate::utils::is_image(&path) {
-                        self.target_count += 1;
+                    if path.is_file() {
+                        if crate::utils::is_image(&path) {
+                            self.target_image_count += 1;
+                        } else if crate::utils::is_video(&path) {
+                            self.target_video_count += 1;
+                        }
                     }
                 }
             }
@@ -289,7 +296,7 @@ impl eframe::App for FaceSearchApp {
                     }
                 }
                 ui.label(match &self.target_dir {
-                    Some(p) => format!("{} ({} images)", p.display(), self.target_count),
+                    Some(p) => format!("{} ({} images, {} videos)", p.display(), self.target_image_count, self.target_video_count),
                     None => "No specific person directory selected (will cluster everyone)".to_string(),
                 });
             });
