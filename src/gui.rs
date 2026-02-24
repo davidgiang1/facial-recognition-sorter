@@ -16,26 +16,22 @@ struct AppSettings {
 
 impl AppSettings {
     fn load() -> Self {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
-            let config_dir = proj_dirs.config_dir();
-            let config_path = config_dir.join("settings.json");
-            if let Ok(data) = fs::read_to_string(config_path) {
-                if let Ok(settings) = serde_json::from_str(&data) {
-                    return settings;
-                }
+        let config_dir = crate::get_app_data_dir();
+        let config_path = config_dir.join("settings.json");
+        if let Ok(data) = fs::read_to_string(config_path) {
+            if let Ok(settings) = serde_json::from_str(&data) {
+                return settings;
             }
         }
         Self::default()
     }
 
     fn save(&self) {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
-            let config_dir = proj_dirs.config_dir();
-            if fs::create_dir_all(config_dir).is_ok() {
-                let config_path = config_dir.join("settings.json");
-                if let Ok(data) = serde_json::to_string_pretty(self) {
-                    let _ = fs::write(config_path, data);
-                }
+        let config_dir = crate::get_app_data_dir();
+        if fs::create_dir_all(&config_dir).is_ok() {
+            let config_path = config_dir.join("settings.json");
+            if let Ok(data) = serde_json::to_string_pretty(self) {
+                let _ = fs::write(config_path, data);
             }
         }
     }

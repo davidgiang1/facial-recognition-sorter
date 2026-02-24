@@ -27,7 +27,14 @@ struct TargetCache {
 }
 
 pub fn get_app_data_dir() -> PathBuf {
-    if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
+    // Developer Mode Check: If Cargo.toml is in the current working directory,
+    // we assume we are running locally in development and save data here.
+    if Path::new("Cargo.toml").exists() {
+        return PathBuf::from(".");
+    }
+
+    // Production Mode: Save to AppData/Roaming/Facial Recognition Sorter
+    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "Facial Recognition Sorter") {
         let data_dir = proj_dirs.data_dir();
         if !data_dir.exists() {
             let _ = fs::create_dir_all(data_dir);
