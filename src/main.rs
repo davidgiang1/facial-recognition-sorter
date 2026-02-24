@@ -765,9 +765,9 @@ pub fn process_directory(
     if !query_people.is_empty() {
         log!("Gallery matching with {} target faces...", query_people.len());
 
-        let input_prefix = input.to_string_lossy().to_string();
+        let input_prefix = input.to_string_lossy().to_string().to_lowercase();
         let relevant_images: Vec<(&String, &Vec<PersonInfo>)> = db.images.iter()
-            .filter(|(path_str, _)| path_str.starts_with(&input_prefix))
+            .filter(|(path_str, _)| path_str.to_lowercase().starts_with(&input_prefix))
             .collect();
 
         log!("Searching for target across {} images...", relevant_images.len());
@@ -785,6 +785,7 @@ pub fn process_directory(
                     if let Some(target_paths) = target_filesizes.get(&size) {
                         if let Ok(source_bytes) = fs::read(source_path) {
                             for target_path in target_paths {
+                                if source_path == target_path { continue; }
                                 if let Ok(target_bytes) = fs::read(target_path) {
                                     if source_bytes == target_bytes {
                                         is_duplicate = true;
