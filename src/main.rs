@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod face;
 mod gui;
 mod utils;
