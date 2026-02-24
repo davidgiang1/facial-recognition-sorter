@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::CommandHideExt;
 
 pub fn find_ffmpeg_path() -> Option<PathBuf> {
     // 1. Check PATH
-    if Command::new("ffmpeg").arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
+    if Command::new("ffmpeg").hide_window().arg("-version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
         return Some(PathBuf::from("ffmpeg"));
     }
 
@@ -65,6 +66,7 @@ pub fn load_image_robustly(path: &Path) -> anyhow::Result<image::DynamicImage> {
     if ext == "heic" || ext == "avif" {
         if let Some(ffmpeg_cmd) = find_ffmpeg_path() {
             let output = Command::new(&ffmpeg_cmd)
+                .hide_window()
                 .arg("-i").arg(path)
                 .arg("-vframes").arg("1")
                 .arg("-f").arg("image2pipe")

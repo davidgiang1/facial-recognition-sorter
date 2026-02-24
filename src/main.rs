@@ -4,6 +4,26 @@ mod face;
 mod gui;
 mod utils;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub trait CommandHideExt {
+    fn hide_window(&mut self) -> &mut Self;
+}
+
+impl CommandHideExt for std::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        #[cfg(target_os = "windows")]
+        {
+            self.creation_flags(CREATE_NO_WINDOW);
+        }
+        self
+    }
+}
+
 use anyhow::Result;
 use face::{FaceDetector, FaceRecognizer, align_face, correct_rotation};
 use gui::{FaceSearchApp, UiMessage};
@@ -147,6 +167,7 @@ fn ensure_video_thumbnail(
 
         let output_pattern = temp_dir.join("frame_%04d.jpg");
         let status = std::process::Command::new(&ffmpeg_cmd)
+            .hide_window()
             .arg("-i").arg(video_path)
             .arg("-vf").arg("fps=1")
             .arg(&output_pattern)
