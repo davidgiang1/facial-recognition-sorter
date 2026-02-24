@@ -303,6 +303,16 @@ pub fn process_directory(
     }
 
     target_images_with_size.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let has_target_videos = target_images_with_size
+        .iter()
+        .any(|(path, _)| crate::utils::is_video(path));
+    if has_target_videos && crate::utils::find_ffmpeg_path().is_none() {
+        anyhow::bail!(
+            "Target directory contains video files, but ffmpeg was not found. Install ffmpeg and add it to PATH, or place ffmpeg.exe beside the app."
+        );
+    }
+
     let mut query_people: Vec<PersonInfo> = Vec::new();
 
     if !target_images_with_size.is_empty() {

@@ -25,13 +25,26 @@ for($i=0;$i -lt $count;$i++){
 }
 ```
 
-## 3. Build installer (unsigned)
+## 3. Stage ffmpeg for packaging
+
+The installer bundles `ffmpeg.exe`. Before compiling setup, place it at:
+
+`third_party/ffmpeg/ffmpeg.exe`
+
+Example:
+
+```powershell
+New-Item -ItemType Directory -Force -Path third_party\ffmpeg | Out-Null
+Copy-Item "C:\path\to\ffmpeg.exe" third_party\ffmpeg\ffmpeg.exe -Force
+```
+
+## 4. Build installer (unsigned)
 
 ```powershell
 iscc setup.iss
 ```
 
-## 4. Build installer (signed)
+## 5. Build installer (signed)
 
 `setup.iss` supports signing when `FRS_SIGN_CMD` is set.
 
@@ -46,7 +59,7 @@ Notes:
 - This signs installer binaries (`$f`) and the uninstaller.
 - If `FRS_SIGN_CMD` is not set, installer builds unsigned.
 
-## 5. Publish GitHub release
+## 6. Publish GitHub release
 
 1. Create/update a tag (example: `v0.1.1`).
 2. Upload `installer_output/Facial-Recognition-Sorter-Setup.exe`.

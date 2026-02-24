@@ -36,5 +36,6 @@ Desktop.ini
 .claude/
 .gemini/
 /installer_output/
+third_party/ffmpeg/
 settings.json
 test_dir.rs

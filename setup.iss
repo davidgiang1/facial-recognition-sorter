@@ -1,9 +1,10 @@
 #define MyAppName "Facial Recognition Sorter"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.2.1"
 #define MyAppPublisher "David Giang"
 #define MyAppExeName "facial-recognition-sorter.exe"
 #define MyAppURL "https://github.com/davidgiang1/facial-recognition-sorter"
 #define FRS_SIGN_CMD GetEnv("FRS_SIGN_CMD")
+#define FFmpegExePath AddBackslash(SourcePath) + "third_party\\ffmpeg\\ffmpeg.exe"
 
 [Setup]
 AppId={{A2D2AC9A-DC20-421E-ACAC-71A4F1886D87}
@@ -43,6 +44,7 @@ SignedUninstaller=yes
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "models\det.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
 Source: "models\rec.onnx"; DestDir: "{app}\models"; Flags: ignoreversion
+Source: "{#FFmpegExePath}"; DestDir: "{app}"; Flags: ignoreversion
 ; If ort places DLLs in the release folder, they will be bundled.
 Source: "target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 

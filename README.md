@@ -14,7 +14,7 @@ To use the application without any technical setup, follow these steps:
 2. **Install:** Double-click the downloaded setup file to install the application to your computer.
 3. **Run:** Open "Facial Recognition Sorter" from your Start Menu.
 
-*(Note: The installer automatically includes the necessary AI models, so you don't need to download them separately!)*
+*(Note: The installer automatically includes the necessary AI models and `ffmpeg`, so you don't need to install them separately.)*
 
 ---
 
