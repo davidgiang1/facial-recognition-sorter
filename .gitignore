@@ -37,4 +37,5 @@ Desktop.ini
 *.swo
 .claude/
 .gemini/
-setup.iss
+/installer_output/
+/ico/
