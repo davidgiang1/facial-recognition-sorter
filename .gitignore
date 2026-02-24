@@ -39,3 +39,5 @@ Desktop.ini
 .gemini/
 /installer_output/
 /ico/
+settings.json
+test_dir.rs
