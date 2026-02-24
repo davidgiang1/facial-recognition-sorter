@@ -580,11 +580,11 @@ impl eframe::App for FaceSearchApp {
                     });
 
                 if do_rebuild {
-                    let db_path = std::path::Path::new(crate::DB_FILE);
+                    let db_path = crate::get_db_file();
                     if db_path.exists() {
                         let _ = std::fs::remove_file(db_path);
                     }
-                    let db_json_path = std::path::Path::new(crate::DB_FILE_JSON);
+                    let db_json_path = crate::get_db_file_json();
                     if db_json_path.exists() {
                         let _ = std::fs::remove_file(db_json_path);
                     }

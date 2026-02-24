@@ -26,7 +26,20 @@ struct TargetCache {
     entries: Vec<PersonInfo>,
 }
 
-const TARGET_CACHE_FILE: &str = "target_cache.bin";
+pub fn get_app_data_dir() -> PathBuf {
+    if let Some(proj_dirs) = directories::ProjectDirs::from("com", "opensource", "facial-recognition-sorter") {
+        let data_dir = proj_dirs.data_dir();
+        if !data_dir.exists() {
+            let _ = fs::create_dir_all(data_dir);
+        }
+        return data_dir.to_path_buf();
+    }
+    PathBuf::from(".")
+}
+
+pub fn get_target_cache_file() -> PathBuf {
+    get_app_data_dir().join("target_cache.bin")
+}
 
 fn compute_target_hash(target_images: &[(PathBuf, u64)]) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -39,8 +52,9 @@ fn compute_target_hash(target_images: &[(PathBuf, u64)]) -> u64 {
 }
 
 fn load_target_cache() -> Option<TargetCache> {
-    if Path::new(TARGET_CACHE_FILE).exists() {
-        if let Ok(data) = fs::read(TARGET_CACHE_FILE) {
+    let cache_file = get_target_cache_file();
+    if cache_file.exists() {
+        if let Ok(data) = fs::read(&cache_file) {
             if let Ok(cache) = bincode::deserialize::<TargetCache>(&data) {
                 return Some(cache);
             }
@@ -51,7 +65,7 @@ fn load_target_cache() -> Option<TargetCache> {
 
 fn save_target_cache(cache: &TargetCache) {
     if let Ok(data) = bincode::serialize(cache) {
-        let _ = fs::write(TARGET_CACHE_FILE, data);
+        let _ = fs::write(get_target_cache_file(), data);
     }
 }
 
@@ -71,12 +85,19 @@ pub struct Database {
     pub images: HashMap<String, Vec<PersonInfo>>,
 }
 
-pub const DB_FILE: &str = "faces_db.bin";
-pub const DB_FILE_JSON: &str = "faces_db.json";
+pub fn get_db_file() -> PathBuf {
+    get_app_data_dir().join("faces_db.bin")
+}
+
+pub fn get_db_file_json() -> PathBuf {
+    get_app_data_dir().join("faces_db.json")
+}
 
 fn load_database() -> Database {
-    if Path::new(DB_FILE).exists() {
-        if let Ok(data) = fs::read(DB_FILE) {
+    let db_file = get_db_file();
+    let db_file_json = get_db_file_json();
+    if db_file.exists() {
+        if let Ok(data) = fs::read(&db_file) {
             if let Ok(db) = bincode::deserialize::<Database>(&data) {
                 if db.version == DB_VERSION {
                     return db;
@@ -84,8 +105,8 @@ fn load_database() -> Database {
             }
         }
     }
-    if Path::new(DB_FILE_JSON).exists() {
-        if let Ok(content) = fs::read_to_string(DB_FILE_JSON) {
+    if db_file_json.exists() {
+        if let Ok(content) = fs::read_to_string(&db_file_json) {
             if let Ok(db) = serde_json::from_str::<Database>(&content) {
                 if db.version == DB_VERSION {
                     return db;
@@ -99,7 +120,7 @@ fn load_database() -> Database {
 fn save_database(db: &mut Database) -> Result<()> {
     db.version = DB_VERSION;
     let data = bincode::serialize(db)?;
-    fs::write(DB_FILE, data)?;
+    fs::write(get_db_file(), data)?;
     Ok(())
 }
 
