@@ -24,3 +24,6 @@ Name: "{commondesktop}\Facial Recognition Sorter"; Filename: "{app}\facial-recog
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{userappdata}\Facial Recognition Sorter"
