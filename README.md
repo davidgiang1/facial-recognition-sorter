@@ -1,66 +1,59 @@
 # Facial Recognition Sorter
 
-A desktop application that uses artificial intelligence to find photos of a specific person within a large collection of images. 
-
-Given a folder of **target reference images** (photos of the person you are looking for) and a large **input image directory** (the collection to search), the application will quickly scan all the images, find matches, and allow you to easily browse and export them.
+A fast desktop app to find one person across a big photo/video library.
 
 ---
 
-## Installation (No Code Required)
-
-To use the application without any technical setup, follow these steps:
+## Quick Install 🚀
 
 1. **Download the Installer:** Go to the [Releases](https://github.com/davidgiang1/facial-recognition-sorter/releases) page and download the latest `Facial-Recognition-Sorter-Setup.exe`.
-2. **Install:** Double-click the downloaded setup file to install the application to your computer.
+2. **Install:** Run the setup file.
 3. **Run:** Open "Facial Recognition Sorter" from your Start Menu.
 
-*(Note: The installer automatically includes the necessary AI models and `ffmpeg`, so you don't need to install them separately.)*
+The installer already includes AI models + `ffmpeg`.
 
 ---
 
-## How to Use
+## Quick Start 📸
 
-1. **Launch the application.**
-2. **Select Input Directory:** Choose the large folder of images/videos you want to search.
-3. **Select People Library:** Choose a parent folder (for example `people/`) that contains one subfolder per person.
-4. **Select Target Person:** Pick the person subfolder from the dropdown (for example `people/Alice/`).
-5. **Adjust Thresholds:** Tune distance/rejection sliders if needed.
-6. **Start Processing:** Click the **Start Processing** button.
-7. **Review Results:** The app shows ranked matches. Select any results and use "Copy Selected to Person Folder" to add them to the current person.
+1. Select **Input Directory** (the big folder to search).
+2. Select **People Library** (`people/`).
+3. Pick **Target Person** from the dropdown.
+4. Click **Start Processing**.
+5. Copy good matches into that person’s folder.
 
-Expected folder structure:
+Expected layout:
 
 ```
 people/
-  Alice/
+  Person_One/
     ref1.jpg
     ref2.jpg
-  Bob/
+  Person_Two/
     ref1.jpg
 ```
 
-*Note: The first time you search a large folder, it may take some time as it analyzes all the faces. Subsequent searches in the same folder will be much faster.*
+Tip: first run is slower; later runs are much faster. ⚡
 
 ---
 
-## FAQ
+## FAQ ❓
 
 **Does this require an internet connection?**
-No. All processing is done locally on your computer. No images or data are ever uploaded to the internet. Your privacy is guaranteed.
+No. Everything runs locally on your computer.
 
 **What kind of graphics card do I need?**
-The application uses DirectML, which works on most modern Windows GPUs (NVIDIA, AMD, and Intel).
+Most modern Windows GPUs are supported (NVIDIA, AMD, Intel via DirectML).
 
 ---
 
-## Development & Technical Details
+## For Developers 🛠️
 
-Are you a developer interested in how this application is built, its architecture, or how to compile it from source? Please refer to the [DEVELOPMENT.md](DEVELOPMENT.md) guide.
-
-For release packaging, installer signing, and icon quality checks, use [RELEASE.md](RELEASE.md).
+- Build + architecture: [DEVELOPMENT.md](DEVELOPMENT.md)
+- Packaging + release flow: [RELEASE.md](RELEASE.md)
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
