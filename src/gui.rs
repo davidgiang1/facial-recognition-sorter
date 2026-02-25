@@ -13,6 +13,11 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Serialize, Deserialize, Default)]
 struct AppSettings {
     input_dir: Option<PathBuf>,
+    #[serde(default)]
+    people_dir: Option<PathBuf>,
+    #[serde(default)]
+    selected_person: Option<String>,
+    #[serde(default)]
     target_dir: Option<PathBuf>,
 }
 
@@ -41,6 +46,9 @@ impl AppSettings {
 
 pub struct FaceSearchApp {
     input_dir: Option<PathBuf>,
+    people_dir: Option<PathBuf>,
+    selected_person: Option<String>,
+    people_names: Vec<String>,
     target_dir: Option<PathBuf>,
     match_threshold_min: f32,
     match_threshold: f32,
@@ -85,9 +93,24 @@ impl Default for FaceSearchApp {
     fn default() -> Self {
         let (tx, rx) = channel();
         let settings = AppSettings::load();
+        let mut people_dir = settings.people_dir.clone();
+        let mut selected_person = settings.selected_person.clone();
+        let target_dir = settings.target_dir.clone();
+
+        // Backward compatibility with older settings that only had target_dir.
+        if people_dir.is_none() {
+            if let Some(td) = &target_dir {
+                people_dir = td.parent().map(|p| p.to_path_buf());
+                selected_person = td.file_name().map(|n| n.to_string_lossy().to_string());
+            }
+        }
+
         Self {
             input_dir: settings.input_dir,
-            target_dir: settings.target_dir,
+            people_dir,
+            selected_person,
+            people_names: Vec::new(),
+            target_dir,
             match_threshold_min: 0.0,
             match_threshold: 0.65,
             filter_threshold: 0.2,
@@ -137,6 +160,8 @@ impl FaceSearchApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let mut app = Self::default();
+        app.refresh_people_names();
+        app.sync_target_dir_from_selection();
         app.update_target_count();
         app
     }
@@ -144,9 +169,41 @@ impl FaceSearchApp {
     fn save_settings(&self) {
         let settings = AppSettings {
             input_dir: self.input_dir.clone(),
+            people_dir: self.people_dir.clone(),
+            selected_person: self.selected_person.clone(),
             target_dir: self.target_dir.clone(),
         };
         settings.save();
+    }
+
+    fn refresh_people_names(&mut self) {
+        self.people_names.clear();
+        if let Some(people_dir) = &self.people_dir {
+            if let Ok(entries) = std::fs::read_dir(people_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
+                            self.people_names.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        self.people_names.sort_unstable_by_key(|name| name.to_lowercase());
+
+        if let Some(selected) = &self.selected_person {
+            if !self.people_names.iter().any(|name| name == selected) {
+                self.selected_person = None;
+            }
+        }
+    }
+
+    fn sync_target_dir_from_selection(&mut self) {
+        self.target_dir = match (&self.people_dir, &self.selected_person) {
+            (Some(people_dir), Some(person)) => Some(people_dir.join(person)),
+            _ => None,
+        };
     }
 
     fn update_target_count(&mut self) {
@@ -228,19 +285,25 @@ impl eframe::App for FaceSearchApp {
             }
         }
 
-        // Handle drag and drop for target directory (we'll just take the first folder or parent of first file)
+        // Handle drag and drop for target person directory.
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
                 if let Some(path) = &file.path {
-                    if path.is_dir() {
-                        self.target_dir = Some(path.clone());
-                        self.update_target_count();
-                        break;
+                    let target_path = if path.is_dir() {
+                        path.clone()
                     } else if let Some(parent) = path.parent() {
-                        self.target_dir = Some(parent.to_path_buf());
-                        self.update_target_count();
-                        break;
-                    }
+                        parent.to_path_buf()
+                    } else {
+                        continue;
+                    };
+
+                    self.people_dir = target_path.parent().map(|p| p.to_path_buf());
+                    self.selected_person = target_path.file_name().map(|n| n.to_string_lossy().to_string());
+                    self.refresh_people_names();
+                    self.sync_target_dir_from_selection();
+                    self.update_target_count();
+                    self.save_settings();
+                    break;
                 }
             }
         });
@@ -270,32 +333,81 @@ impl eframe::App for FaceSearchApp {
 
             ui.separator();
 
-            // --- Target Directory Input ---
+            // --- People Library Input ---
             ui.horizontal(|ui| {
-                if ui.button("Select Target Person Directory").clicked() {
-                    let start_dir = self.target_dir.as_ref()
-                        .and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                if ui.button("Select People Library").clicked() {
                     let mut dialog = FileDialog::new();
-                    if let Some(sd) = &start_dir {
+                    if let Some(sd) = &self.people_dir {
                         dialog = dialog.set_directory(sd);
                     }
                     if let Some(path) = dialog.pick_folder() {
-                        self.target_dir = Some(path);
+                        self.people_dir = Some(path);
+                        self.refresh_people_names();
+                        if self.selected_person.is_none() {
+                            self.selected_person = self.people_names.first().cloned();
+                        }
+                        self.sync_target_dir_from_selection();
                         self.update_target_count();
                         self.save_settings();
                     }
                 }
-                if let Some(p) = &self.target_dir {
+                if let Some(p) = &self.people_dir {
                     if ui.button("📂 Open").clicked() {
                         let _ = std::process::Command::new("explorer").arg(p).spawn();
                     }
                     if ui.button("⟳ Refresh").clicked() {
+                        self.refresh_people_names();
+                        if self.selected_person.is_none() {
+                            self.selected_person = self.people_names.first().cloned();
+                        }
+                        self.sync_target_dir_from_selection();
                         self.update_target_count();
+                        self.save_settings();
                     }
                 }
+                ui.label(match &self.people_dir {
+                    Some(p) => format!("Library: {}", p.display()),
+                    None => "No people library selected".to_string(),
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Target person:");
+                let mut selected_name = self
+                    .selected_person
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| "Select person...".to_string());
+
+                let combo_enabled = self.people_dir.is_some();
+                ui.add_enabled_ui(combo_enabled, |ui| {
+                    egui::ComboBox::from_id_source("target_person_combo")
+                        .selected_text(selected_name.clone())
+                        .show_ui(ui, |ui| {
+                            for name in &self.people_names {
+                                ui.selectable_value(&mut selected_name, name.clone(), name);
+                            }
+                        });
+                });
+
+                if combo_enabled && self.people_names.iter().any(|n| n == &selected_name) {
+                    if self.selected_person.as_ref() != Some(&selected_name) {
+                        self.selected_person = Some(selected_name);
+                        self.sync_target_dir_from_selection();
+                        self.update_target_count();
+                        self.save_settings();
+                    }
+                }
+
+                if let Some(target_dir) = &self.target_dir {
+                    if ui.button("📂 Open Person Folder").clicked() {
+                        let _ = std::process::Command::new("explorer").arg(target_dir).spawn();
+                    }
+                }
+
                 ui.label(match &self.target_dir {
                     Some(p) => format!("{} ({} images, {} videos)", p.display(), self.target_image_count, self.target_video_count),
-                    None => "No specific person directory selected (will cluster everyone)".to_string(),
+                    None => "No person selected".to_string(),
                 });
             });
 
@@ -349,7 +461,7 @@ impl eframe::App for FaceSearchApp {
             ui.separator();
 
             // --- Start Button ---
-            ui.add_enabled_ui(!self.is_processing && self.input_dir.is_some(), |ui| {
+            ui.add_enabled_ui(!self.is_processing && self.input_dir.is_some() && self.target_dir.is_some(), |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Start Processing").clicked() {
                         self.update_target_count();
@@ -362,7 +474,7 @@ impl eframe::App for FaceSearchApp {
                         let tx_clone = self.tx.clone();
                         let input = self.input_dir.clone().unwrap();
                         let target_dir = self.target_dir.clone();
-                        let people_dir = target_dir.as_ref().and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                        let people_dir = self.people_dir.clone();
                         let threshold_min = self.match_threshold_min.min(self.match_threshold);
                         let threshold_max = self.match_threshold;
                         let filter_threshold = self.filter_threshold;
@@ -395,6 +507,10 @@ impl eframe::App for FaceSearchApp {
                 });
             });
 
+            if self.input_dir.is_some() && self.target_dir.is_none() {
+                ui.label("Select a people library and target person to enable processing.");
+            }
+
             // --- Status ---
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.status_msg).strong());
@@ -402,7 +518,7 @@ impl eframe::App for FaceSearchApp {
                 if !self.is_processing && !self.all_ranked_matches.is_empty() && self.target_dir.is_some() {
                     let selected_count = self.matched_images_cache.iter().filter(|(_, _, s, _)| *s).count();
                     if selected_count > 0 {
-                        if ui.button(format!("Copy {} Selected to Target Directory", selected_count)).clicked() {
+                        if ui.button(format!("Copy {} Selected to Person Folder", selected_count)).clicked() {
                             self.show_copy_confirm = true;
                         }
                     }
@@ -457,7 +573,7 @@ impl eframe::App for FaceSearchApp {
                     .default_size([600.0, 450.0])
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        ui.heading(format!("Copy {} selected photo(s) to target directory?", selected_indices.len()));
+                        ui.heading(format!("Copy {} selected photo(s) to the selected person folder?", selected_indices.len()));
                         ui.separator();
 
                         let cell_size = 100.0_f32;
@@ -533,7 +649,7 @@ impl eframe::App for FaceSearchApp {
                     let reload_page = self.current_page.min(max_page);
                     self.load_page(reload_page);
 
-                    self.status_msg = format!("Successfully copied {} images to Target Directory!", copy_count);
+                    self.status_msg = format!("Successfully copied {} images to the selected person folder!", copy_count);
                     self.update_target_count();
                     self.show_copy_confirm = false;
                 }
@@ -599,8 +715,7 @@ impl eframe::App for FaceSearchApp {
                 let mut do_create = false;
                 let mut do_cancel = false;
 
-                let people_dir = self.target_dir.as_ref()
-                    .and_then(|td| td.parent().map(|p| p.to_path_buf()));
+                let people_dir = self.people_dir.clone();
 
                 egui::Window::new("Create New Person")
                     .collapsible(false)
@@ -673,6 +788,11 @@ impl eframe::App for FaceSearchApp {
                                     "Created '{}' and copied image.",
                                     self.new_person_name.trim()
                                 );
+                                self.refresh_people_names();
+                                self.selected_person = Some(self.new_person_name.trim().to_string());
+                                self.sync_target_dir_from_selection();
+                                self.update_target_count();
+                                self.save_settings();
                             } else {
                                 self.status_msg = "Failed to copy image.".to_string();
                             }
@@ -869,16 +989,14 @@ impl eframe::App for FaceSearchApp {
                                         ui.close_menu();
                                     }
                                     ui.separator();
-                                    let has_people_dir = self.target_dir.as_ref()
-                                        .and_then(|td| td.parent())
-                                        .is_some();
+                                    let has_people_dir = self.people_dir.is_some();
                                     if has_people_dir {
                                         if ui.button("➕ Create New Person + Add Image").clicked() {
                                             new_person_trigger = Some(img_path.clone());
                                             ui.close_menu();
                                         }
                                     } else {
-                                        ui.add_enabled(false, egui::Button::new("➕ Create New Person (set target dir first)"));
+                                        ui.add_enabled(false, egui::Button::new("➕ Create New Person (set people library first)"));
                                     }
                                 });
 

@@ -21,11 +21,23 @@ To use the application without any technical setup, follow these steps:
 ## How to Use
 
 1. **Launch the application.**
-2. **Select Target Directory:** Click "Browse" to choose a folder containing a few clear reference photos of the person you want to find.
-3. **Select Input Directory:** Click "Browse" to choose the large folder of images you want to search through.
-4. **Adjust Threshold:** Use the distance threshold sliders if needed (a lower number means a stricter match, but might miss some photos; a higher number finds more photos, but might include incorrect people).
-5. **Search:** Click the **Search** button. 
-6. **Review Results:** The app will process the images and show you the best matches. You can click on thumbnails to view them, select the ones you want, and use the "Copy selected to output" button to save them to a new folder!
+2. **Select Input Directory:** Choose the large folder of images/videos you want to search.
+3. **Select People Library:** Choose a parent folder (for example `people/`) that contains one subfolder per person.
+4. **Select Target Person:** Pick the person subfolder from the dropdown (for example `people/Alice/`).
+5. **Adjust Thresholds:** Tune distance/rejection sliders if needed.
+6. **Start Processing:** Click the **Start Processing** button.
+7. **Review Results:** The app shows ranked matches. Select any results and use "Copy Selected to Person Folder" to add them to the current person.
+
+Expected folder structure:
+
+```
+people/
+  Alice/
+    ref1.jpg
+    ref2.jpg
+  Bob/
+    ref1.jpg
+```
 
 *Note: The first time you search a large folder, it may take some time as it analyzes all the faces. Subsequent searches in the same folder will be much faster.*
 
