@@ -70,7 +70,7 @@ pub fn get_target_cache_file() -> PathBuf {
 
 fn compute_target_hash(target_images: &[(PathBuf, u64)]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    11u64.hash(&mut hasher);  // bumped: forces cache invalidation when PersonInfo schema changes
+    13u64.hash(&mut hasher);  // bumped: forces cache invalidation when clustering algorithm changes
     for (path, size) in target_images {
         path.to_string_lossy().hash(&mut hasher);
         size.hash(&mut hasher);
@@ -238,10 +238,21 @@ pub fn process_directory(
     filter_threshold: f32,
     tx: std::sync::mpsc::Sender<UiMessage>,
 ) -> Result<()> {
+    let log_file_path = crate::get_app_data_dir().join("output").join("run.log");
+    let _ = std::fs::create_dir_all(log_file_path.parent().unwrap());
+    let log_file = std::sync::Mutex::new(
+        std::fs::File::create(&log_file_path).ok()
+    );
     macro_rules! log {
         ($($arg:tt)*) => {
             let msg = format!($($arg)*);
             println!("{}", msg);
+            if let Ok(mut guard) = log_file.lock() {
+                if let Some(ref mut f) = *guard {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", msg);
+                }
+            }
             let _ = tx.send(UiMessage::Log(msg));
         };
     }
@@ -384,15 +395,18 @@ pub fn process_directory(
                 })
                 .collect();
 
-            // Pass 2: Global Clustering to find the Dominant Identity
-            // Instead of picking a "winner" per image, we pool ALL faces and find the largest cluster.
-            // This is robust against images that contain ONLY bystanders (which would be false positives otherwise).
-            
-            // Flatten per_image_candidates into a flat list, but keep track of source image index
+            // Pass 2: Find the dominant identity using anchor faces.
+            // Images with exactly 1 detected face are "anchors" — that face MUST be the target
+            // (the user curated this folder). We average anchor embeddings to build a robust
+            // centroid that handles pose/lighting variation across photos.
+
             struct FlatCandidate {
                 image_idx: usize,
                 face: TargetCandidate,
             }
+
+            // Count faces per image before flattening
+            let faces_per_image: Vec<usize> = per_image_candidates.iter().map(|c| c.len()).collect();
 
             let mut all_candidates: Vec<FlatCandidate> = Vec::new();
             for (idx, candidates) in per_image_candidates.into_iter().enumerate() {
@@ -407,33 +421,63 @@ pub fn process_directory(
                 anyhow::bail!("Could not detect any faces in the provided target images.");
             }
 
-            // Calculate "neighbor count" for every face
-            // A face has a neighbor if similarity > 0.6
-            // The face with the most neighbors is the "Centroid".
-            let mut neighbor_counts = vec![0; total_faces];
-            const CLUSTER_SIM_THRESHOLD: f32 = 0.6;
+            // Collect anchor faces: faces from images where exactly 1 face was detected
+            let anchor_embeddings: Vec<&Vec<f32>> = all_candidates.iter()
+                .filter(|c| faces_per_image[c.image_idx] == 1)
+                .map(|c| &c.face.face_embedding)
+                .collect();
 
-            // Only parallelize the outer loop if we have many faces (n^2 complexity)
-            // For < 1000 faces, single thread is instant.
-            for i in 0..total_faces {
-                for j in 0..total_faces {
-                    if i == j { continue; }
-                    let sim = cosine_similarity(&all_candidates[i].face.face_embedding, &all_candidates[j].face.face_embedding);
-                    if sim > CLUSTER_SIM_THRESHOLD {
-                        neighbor_counts[i] += 1;
+            let centroid_embedding = if anchor_embeddings.len() >= 2 {
+                // Average all anchor embeddings to create a robust centroid
+                let dim = anchor_embeddings[0].len();
+                let mut mean = vec![0.0f32; dim];
+                for emb in &anchor_embeddings {
+                    for (i, v) in emb.iter().enumerate() {
+                        mean[i] += v;
                     }
                 }
-            }
+                let n = anchor_embeddings.len() as f32;
+                for v in &mut mean {
+                    *v /= n;
+                }
+                // L2-normalize the mean embedding
+                let norm: f32 = mean.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for v in &mut mean {
+                        *v /= norm;
+                    }
+                }
+                log!("Built centroid from {} anchor faces (single-face images) out of {} total faces across {} images.",
+                     anchor_embeddings.len(), total_faces, target_images_with_size.len());
+                mean
+            } else {
+                // Fallback: not enough anchors, use image-coverage clustering
+                log!("Only {} anchor faces found, falling back to image-coverage clustering.", anchor_embeddings.len());
+                let mut image_coverage = vec![0usize; total_faces];
+                let mut neighbor_counts = vec![0usize; total_faces];
+                const CLUSTER_SIM_THRESHOLD: f32 = 0.4;
 
-            // Find the centroid (face with max neighbors)
-            // If multiple faces have the same max count, picking the first one is fine as they are likely similar.
-            let (best_idx, max_neighbors) = neighbor_counts.iter().enumerate()
-                .max_by_key(|&(_, &count)| count)
-                .unwrap();
-            
-            let centroid_embedding = all_candidates[best_idx].face.face_embedding.clone();
-            log!("Identified dominant identity from {} total faces (centroid has {} neighbors).", 
-                 total_faces, max_neighbors);
+                for i in 0..total_faces {
+                    let mut matched_images = std::collections::HashSet::new();
+                    matched_images.insert(all_candidates[i].image_idx);
+                    for j in 0..total_faces {
+                        if i == j { continue; }
+                        let sim = cosine_similarity(&all_candidates[i].face.face_embedding, &all_candidates[j].face.face_embedding);
+                        if sim > CLUSTER_SIM_THRESHOLD {
+                            neighbor_counts[i] += 1;
+                            matched_images.insert(all_candidates[j].image_idx);
+                        }
+                    }
+                    image_coverage[i] = matched_images.len();
+                }
+
+                let (best_idx, _) = image_coverage.iter().enumerate()
+                    .max_by_key(|&(idx, &coverage)| (coverage, neighbor_counts[idx]))
+                    .unwrap();
+                log!("Fallback centroid covers {}/{} images, {} neighbors.",
+                     image_coverage[best_idx], target_images_with_size.len(), neighbor_counts[best_idx]);
+                all_candidates[best_idx].face.face_embedding.clone()
+            };
 
             // Pass 3: Filter - Keep ONLY faces that match the centroid
             // Higher threshold = stricter, rejects more bystanders but may lose target variations.

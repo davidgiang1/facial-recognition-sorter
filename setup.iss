@@ -1,5 +1,5 @@
 #define MyAppName "Facial Recognition Sorter"
-#define MyAppVersion "0.2.2"
+#define MyAppVersion "0.2.3"
 #define MyAppPublisher "David Giang"
 #define MyAppExeName "facial-recognition-sorter.exe"
 #define MyAppURL "https://github.com/davidgiang1/facial-recognition-sorter"
