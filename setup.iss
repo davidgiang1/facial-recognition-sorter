@@ -1,5 +1,9 @@
 #define MyAppName "Facial Recognition Sorter"
-#define MyAppVersion "0.2.3"
+; MyAppVersion is injected by CI via /DMyAppVersion=X.Y.Z derived from the git tag.
+; The default below is only used for local (non-CI) builds run without /D.
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
 #define MyAppPublisher "David Giang"
 #define MyAppExeName "facial-recognition-sorter.exe"
 #define MyAppURL "https://github.com/davidgiang1/facial-recognition-sorter"
@@ -20,7 +24,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 OutputDir=installer_output
-OutputBaseFilename=Facial-Recognition-Sorter-Setup
+OutputBaseFilename=Facial-Recognition-Sorter-{#MyAppVersion}-Setup
 SetupIconFile=res\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 VersionInfoCompany={#MyAppPublisher}

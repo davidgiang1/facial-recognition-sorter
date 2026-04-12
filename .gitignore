@@ -39,3 +39,12 @@ Desktop.ini
 third_party/ffmpeg/
 settings.json
 test_dir.rs
+
+# CI scratch files (created by .github/workflows/release.yml when run locally)
+/patch_version.py
+/buffalo_l.zip
+/ffmpeg.zip
+
+# Python caches
+__pycache__/
+*.pyc

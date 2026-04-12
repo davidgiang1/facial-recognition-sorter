@@ -6,7 +6,7 @@ A fast desktop app to find one person across a big photo/video library.
 
 ## Quick Install 🚀
 
-1. **Download the Installer:** Go to the [Releases](https://github.com/davidgiang1/facial-recognition-sorter/releases) page and download the latest `Facial-Recognition-Sorter-Setup.exe`.
+1. **Download the Installer:** Go to the [Releases](https://github.com/davidgiang1/facial-recognition-sorter/releases) page and download the latest `Facial-Recognition-Sorter-<version>-Setup.exe`.
 2. **Install:** Run the setup file.
 3. **Run:** Open "Facial Recognition Sorter" from your Start Menu.
 

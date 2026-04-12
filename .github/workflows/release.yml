@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Serialize release builds: if two pushes land while a build is in flight,
+# the queued run re-computes the next version after the earlier run tags,
+# so each push produces its own release without tag collisions.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # InsightFace buffalo_l pack — source of det.onnx (SCRFD) and rec.onnx (ArcFace).
+  # Hash-pinned so a compromised or replaced upstream asset fails the build.
+  BUFFALO_L_URL: https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+  BUFFALO_L_SHA256: 80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f
+  DET_SHA256: 5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91
+  REC_SHA256: 4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
+  # BtbN static FFmpeg build. The `latest` tag rolls forward; we only use
+  # ffmpeg.exe as a subprocess so version drift is harmless.
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so `git tag -l` sees every existing v* tag when
+          # computing the next version number.
+          fetch-depth: 0
+
+      - name: Compute next patch version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)
+          if [ -z "$LATEST" ]; then
+            NEXT_VERSION="0.0.1"
+            echo "No existing v* tags; starting at v$NEXT_VERSION"
+          else
+            LATEST_STRIPPED="${LATEST#v}"
+            IFS=. read -r MAJ MIN PAT <<< "$LATEST_STRIPPED"
+            NEXT_VERSION="${MAJ}.${MIN}.$((PAT + 1))"
+            echo "Latest tag: $LATEST -> next: v$NEXT_VERSION"
+          fi
+          echo "VERSION=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG=v$NEXT_VERSION"    >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Sync Cargo.toml + Cargo.lock to computed version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          # Write the patch script with a quoted heredoc so bash does not touch
+          # its contents; the script reads VERSION from the environment.
+          cat > patch_version.py <<'PY'
+          import os, pathlib, re, sys
+          version = os.environ["VERSION"]
+
+          def patch(path, pattern, description):
+              p = pathlib.Path(path)
+              text = p.read_text()
+              if not re.search(pattern, text):
+                  sys.exit(f"failed to locate {description} in {path}")
+              new = re.sub(
+                  pattern,
+                  lambda m: m.group(1) + version + m.group(2),
+                  text,
+                  count=1,
+              )
+              if new != text:
+                  p.write_text(new)
+                  print(f"patched {path}: {description} -> {version}")
+              else:
+                  print(f"{path}: {description} already at {version}")
+
+          patch(
+              "Cargo.toml",
+              r'(?ms)^(\[package\][^\[]*?\nversion = ")[^"]+(")',
+              "[package] version",
+          )
+          patch(
+              "Cargo.lock",
+              r'(name = "facial-recognition-sorter"\nversion = ")[^"]+(")',
+              "facial-recognition-sorter version",
+          )
+          PY
+          python patch_version.py
+          rm -f patch_version.py
+          grep -n '^version' Cargo.toml
+          grep -A1 '"facial-recognition-sorter"' Cargo.lock | head -4
+
+      - name: Download + verify SCRFD/ArcFace models (InsightFace buffalo_l)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          curl -L --fail --retry 3 --retry-delay 5 -o buffalo_l.zip "$BUFFALO_L_URL"
+          echo "${BUFFALO_L_SHA256} *buffalo_l.zip" | sha256sum -c -
+          unzip -o buffalo_l.zip det_10g.onnx w600k_r50.onnx
+          mv -f det_10g.onnx models/det.onnx
+          mv -f w600k_r50.onnx models/rec.onnx
+          echo "${DET_SHA256} *models/det.onnx" | sha256sum -c -
+          echo "${REC_SHA256} *models/rec.onnx" | sha256sum -c -
+          rm -f buffalo_l.zip
+          ls -la models/
+
+      - name: Download + stage FFmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p third_party/ffmpeg
+          curl -L --fail --retry 3 --retry-delay 5 -o ffmpeg.zip "$FFMPEG_URL"
+          unzip -j -o ffmpeg.zip '*/bin/ffmpeg.exe' -d third_party/ffmpeg/
+          rm -f ffmpeg.zip
+          test -s third_party/ffmpeg/ffmpeg.exe
+          ls -la third_party/ffmpeg/
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.VERSION }} setup.iss'
+
+      - name: Show installer output
+        shell: bash
+        run: ls -la installer_output/
+
+      - name: Upload installer as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Facial-Recognition-Sorter-${{ steps.version.outputs.VERSION }}-Setup
+          path: installer_output/Facial-Recognition-Sorter-*-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release (creates tag atomically)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: ${{ steps.version.outputs.TAG }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: installer_output/Facial-Recognition-Sorter-*-Setup.exe
