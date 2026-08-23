@@ -7,6 +7,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
@@ -413,27 +415,188 @@ fn get_unique_path(dir: &std::path::Path, file_name: &std::ffi::OsStr) -> PathBu
     path
 }
 
-/// True if `path`'s contents byte-for-byte match a file already sorted into
-/// the people library. `target_filesizes` groups already-sorted files by size
-/// for a cheap first filter before falling back to a full read - the same
-/// "already seen" check `process_directory` uses for the Matches tab in
-/// `main.rs`, so a photo doesn't get re-suggested once it's been sorted.
-fn is_already_sorted(path: &Path, target_filesizes: &HashMap<u64, Vec<PathBuf>>) -> bool {
-    let size = match fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return false,
-    };
-    let Some(candidates) = target_filesizes.get(&size) else { return false; };
-    let Ok(bytes) = fs::read(path) else { return false; };
+/// Version stamp for the on-disk content-hash cache; bump if `hash_file`
+/// ever changes what it computes.
+const HASH_CACHE_VERSION: u32 = 1;
 
-    let canon_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    candidates.iter().any(|target| {
-        let canon_target = fs::canonicalize(target).unwrap_or_else(|_| target.clone());
-        if canon_path == canon_target {
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct HashEntry {
+    size: u64,
+    mtime_secs: i64,
+    hash: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HashCacheFile {
+    version: u32,
+    entries: HashMap<PathBuf, HashEntry>,
+}
+
+/// Persisted file-content hashes, keyed by path plus the stat fields that
+/// invalidate them.
+///
+/// Hashing *is* the cost of the already-sorted filter - it has to read every
+/// candidate that collides with the library on size, which on a large library
+/// is tens of gigabytes. Almost none of it changes between scans, so a cold
+/// scan pays once and every later scan reads stat only.
+pub struct ContentHashCache {
+    loaded: HashMap<PathBuf, HashEntry>,
+    /// Every entry this scan used or computed. Saving only these keeps the
+    /// cache tracking the current library instead of growing forever.
+    touched: std::sync::Mutex<Vec<(PathBuf, HashEntry)>>,
+}
+
+impl ContentHashCache {
+    pub fn load(cache_path: &Path) -> Self {
+        let loaded = match fs::read(cache_path).ok().and_then(|b| bincode::deserialize::<HashCacheFile>(&b).ok()) {
+            Some(c) if c.version == HASH_CACHE_VERSION => c.entries,
+            _ => HashMap::new(),
+        };
+        ContentHashCache { loaded, touched: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// Content hash of `path`, reading the file only if it isn't already
+    /// cached against the same size and mtime.
+    fn hash_of(&self, path: &Path, size: u64, mtime_secs: i64) -> Option<u64> {
+        if let Some(hit) = self.loaded.get(path) {
+            if hit.size == size && hit.mtime_secs == mtime_secs {
+                self.record(path, *hit);
+                return Some(hit.hash);
+            }
+        }
+        let hash = hash_file(path)?;
+        self.record(path, HashEntry { size, mtime_secs, hash });
+        Some(hash)
+    }
+
+    fn record(&self, path: &Path, entry: HashEntry) {
+        if let Ok(mut touched) = self.touched.lock() {
+            touched.push((path.to_path_buf(), entry));
+        }
+    }
+
+    pub fn save(self, cache_path: &Path) {
+        let Ok(touched) = self.touched.into_inner() else { return };
+        let file = HashCacheFile {
+            version: HASH_CACHE_VERSION,
+            // serde renders a path as a str, which a non-UTF-8 name would
+            // fail; dropping those keeps one odd filename from costing the
+            // whole cache.
+            entries: touched.into_iter().filter(|(p, _)| p.to_str().is_some()).collect(),
+        };
+        if let Ok(bytes) = bincode::serialize(&file) {
+            let _ = fs::write(cache_path, bytes);
+        }
+    }
+}
+
+/// `size` and `mtime` for a file, the pair that decides whether a cached
+/// hash is still good for it.
+fn stat_key(path: &Path) -> Option<(u64, i64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime))
+}
+
+/// Content index of everything already filed under a person, used to drop
+/// input files that are byte-identical to a photo that has already been
+/// sorted - the same "already seen" check `process_directory` uses for the
+/// Matches tab, so a photo doesn't get re-suggested once it's been sorted.
+///
+/// Keyed by (size, content hash) rather than by re-reading the library file
+/// on every collision, and backed by `ContentHashCache` so repeat scans skip
+/// the reads entirely.
+///
+/// A false positive needs a candidate to match a library file on both size
+/// and 64-bit hash, which across a library this size sits at odds of about
+/// 1 in 10^15 - far below the odds of the filesystem handing back bad data.
+pub struct SortedIndex {
+    /// (size, content hash) -> the canonicalized paths holding that content.
+    /// Paths are kept, rather than just a set of hashes, so a file can still
+    /// recognise *itself* and not be dropped as its own duplicate - which
+    /// happens whenever `target_dir` sits inside `input_dir`.
+    by_content: HashMap<(u64, u64), Vec<PathBuf>>,
+    /// Every size present in `by_content`, so a candidate whose byte count is
+    /// unknown to the library is rejected without being read.
+    sizes: HashSet<u64>,
+}
+
+impl SortedIndex {
+    /// Index every already-sorted file under `people_dir` whose size appears
+    /// in `candidate_sizes`. Sizes no candidate has can never match, so
+    /// they're skipped without ever being read.
+    pub fn build(
+        people_dir: Option<&Path>,
+        candidate_sizes: &HashSet<u64>,
+        cache: &ContentHashCache,
+    ) -> Self {
+        let Some(people_dir) = people_dir else {
+            return SortedIndex { by_content: HashMap::new(), sizes: HashSet::new() };
+        };
+        let sorted_files: Vec<(PathBuf, u64, i64)> = WalkDir::new(people_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_path_buf())
+            .filter(|p| p.is_file() && (crate::utils::is_image(p) || crate::utils::is_video(p)))
+            .filter_map(|p| {
+                let (size, mtime) = stat_key(&p)?;
+                candidate_sizes.contains(&size).then_some((p, size, mtime))
+            })
+            .collect();
+
+        let hashed: Vec<(PathBuf, u64, u64)> = sorted_files
+            .into_par_iter()
+            .filter_map(|(p, size, mtime)| cache.hash_of(&p, size, mtime).map(|h| (p, size, h)))
+            .collect();
+
+        let mut by_content: HashMap<(u64, u64), Vec<PathBuf>> = HashMap::new();
+        let mut sizes = HashSet::new();
+        for (path, size, hash) in hashed {
+            let canon = fs::canonicalize(&path).unwrap_or(path);
+            by_content.entry((size, hash)).or_default().push(canon);
+            sizes.insert(size);
+        }
+        SortedIndex { by_content, sizes }
+    }
+
+    /// True if some *other* file in the people library holds exactly these bytes.
+    pub fn already_sorted(&self, path: &Path, cache: &ContentHashCache) -> bool {
+        let Some((size, mtime)) = stat_key(path) else { return false };
+        // Nothing in the library shares this byte count, so nothing can match
+        // it - and we never have to read the file at all.
+        if !self.sizes.contains(&size) {
             return false;
         }
-        fs::read(target).map(|target_bytes| target_bytes == bytes).unwrap_or(false)
-    })
+        let Some(hash) = cache.hash_of(path, size, mtime) else { return false };
+        let Some(holders) = self.by_content.get(&(size, hash)) else { return false };
+
+        let canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        holders.iter().any(|held| *held != canon)
+    }
+}
+
+/// 64-bit hash of a file's contents, streamed so a large video never has to
+/// be held in memory in full.
+fn hash_file(path: &Path) -> Option<u64> {
+    use std::io::Read;
+
+    let file = fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = DefaultHasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => buf[..n].hash(&mut hasher),
+            Err(_) => return None,
+        }
+    }
+    Some(hasher.finish())
 }
 
 /// Open Explorer with `path` selected inside its containing folder.
@@ -2431,17 +2594,6 @@ impl FaceSearchApp {
             // Built here on the background thread, not the click handler, so a
             // large people library doesn't freeze the UI before scanning even
             // shows as in progress.
-            let mut target_filesizes: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-            if let Some(people_dir) = &people_dir {
-                for entry in WalkDir::new(people_dir).into_iter().filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if path.is_file() && (crate::utils::is_image(path) || crate::utils::is_video(path)) {
-                        let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                        target_filesizes.entry(size).or_default().push(path.to_path_buf());
-                    }
-                }
-            }
-
             let walked: Vec<PathBuf> = WalkDir::new(&input_dir)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -2450,12 +2602,24 @@ impl FaceSearchApp {
                 .filter(|p| crate::utils::is_image(p) || crate::utils::is_video(p))
                 .collect();
 
-            // `is_already_sorted` reads whole files on a size collision, so run
-            // it in parallel rather than one file at a time.
+            // Index the library only over byte counts some candidate actually
+            // has; every other sorted file is skipped without being opened.
+            let candidate_sizes: HashSet<u64> = walked
+                .par_iter()
+                .filter_map(|p| fs::metadata(p).map(|m| m.len()).ok())
+                .collect();
+            let hash_cache_path = crate::get_app_data_dir().join("content_hashes.bin");
+            let hash_cache = ContentHashCache::load(&hash_cache_path);
+            let sorted = SortedIndex::build(people_dir.as_deref(), &candidate_sizes, &hash_cache);
+
+            // A cold scan still has to read every candidate that collides with
+            // the library on size, so run the filter in parallel rather than
+            // one file at a time; later scans come out of the hash cache.
             let candidates: Vec<PathBuf> = walked
                 .into_par_iter()
-                .filter(|p| !is_already_sorted(p, &target_filesizes))
+                .filter(|p| !sorted.already_sorted(p, &hash_cache))
                 .collect();
+            hash_cache.save(&hash_cache_path);
 
             let ranked = crate::metadata_similarity::rank_by_metadata(&anchors, candidates, window_secs);
             let _ = tx.send(MetaSimMessage::Done(ranked));
@@ -2495,9 +2659,11 @@ impl FaceSearchApp {
         });
         ui.label(
             egui::RichText::new(
-                "Ranks input-directory photos by how close their timestamp, camera, GPS location, and \
-                 filename sequence number are to photos already confirmed for this person - useful when \
-                 their face is covered or turned away. Hover a photo for the full breakdown.",
+                "Ranks input-directory photos by how close their filename sequence number, timestamp, \
+                 pixel dimensions, camera, and GPS location are to photos already confirmed for this \
+                 person - useful when their face is covered or turned away. A photo sitting right next \
+                 to a confirmed one in the filename sequence is kept even if its timestamp falls outside \
+                 the window below. Hover a photo for the full breakdown.",
             )
             .weak()
             .size(11.0),
@@ -2597,14 +2763,23 @@ impl FaceSearchApp {
                                 );
                             }
 
-                            let camera_icon = if candidate.same_camera { "📷" } else { "" };
+                            // Sequence proximity is the strongest signal in the
+                            // ranking, so it gets its own badge rather than
+                            // living only in the hover text.
+                            let sequence_badge = match candidate.sequence_gap {
+                                Some(gap) if candidate.rescued_by_sequence => format!(" · 🔗{}", gap),
+                                Some(gap) => format!(" · #{}", gap),
+                                None => String::new(),
+                            };
+                            let camera_icon = if candidate.same_camera { " 📷" } else { "" };
                             ui.painter().text(
                                 egui::pos2(rect.left() + 3.0, rect.bottom() - 14.0),
                                 egui::Align2::LEFT_TOP,
                                 format!(
-                                    "{:.0}% · Δ{} {}",
+                                    "{:.0}% · Δ{}{}{}",
                                     candidate.score.min(1.0) * 100.0,
                                     crate::metadata_similarity::humanize_delta(candidate.delta_secs),
+                                    sequence_badge,
                                     camera_icon,
                                 ),
                                 egui::FontId::proportional(10.0),
@@ -2868,6 +3043,124 @@ impl FaceSearchApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sizes_of(paths: &[&Path]) -> HashSet<u64> {
+        paths.iter().filter_map(|p| fs::metadata(p).map(|m| m.len()).ok()).collect()
+    }
+
+    #[test]
+    fn sorted_index_drops_byte_identical_copies_but_keeps_look_alikes() {
+        let root = scratch("sorted_index");
+        let people = root.join("people/julia");
+        let input = root.join("input");
+        write(&people.join("IMG_1.jpg"), "the same bytes");
+        // Same length, different content - the size bucket collides but the
+        // hash must not.
+        write(&input.join("copy.jpg"), "the same bytes");
+        write(&input.join("twin.jpg"), "the SAME bytes");
+        write(&input.join("other.jpg"), "completely different length here");
+
+        let copy = input.join("copy.jpg");
+        let twin = input.join("twin.jpg");
+        let other = input.join("other.jpg");
+        let cache = ContentHashCache::load(&root.join("hashes.bin"));
+        let index = SortedIndex::build(
+            Some(&root.join("people")),
+            &sizes_of(&[&copy, &twin, &other]),
+            &cache,
+        );
+
+        assert!(index.already_sorted(&copy, &cache), "an exact copy is already sorted");
+        assert!(!index.already_sorted(&twin, &cache), "same size, different bytes is not a copy");
+        assert!(!index.already_sorted(&other, &cache));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sorted_index_does_not_flag_a_sorted_file_as_its_own_duplicate() {
+        // The target folder can sit inside the input folder, so the very same
+        // file gets walked twice; it must not filter itself out.
+        let root = scratch("sorted_index_self");
+        let people = root.join("people/julia");
+        write(&people.join("IMG_1.jpg"), "content");
+
+        let itself = people.join("IMG_1.jpg");
+        let cache = ContentHashCache::load(&root.join("hashes.bin"));
+        let index = SortedIndex::build(Some(&root.join("people")), &sizes_of(&[&itself]), &cache);
+        assert!(!index.already_sorted(&itself, &cache));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sorted_index_without_a_people_dir_keeps_everything() {
+        let root = scratch("sorted_index_none");
+        write(&root.join("a.jpg"), "content");
+        let a = root.join("a.jpg");
+        let cache = ContentHashCache::load(&root.join("hashes.bin"));
+        let index = SortedIndex::build(None, &sizes_of(&[&a]), &cache);
+        assert!(!index.already_sorted(&a, &cache));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_hash_cache_reuses_entries_and_notices_a_changed_file() {
+        let root = scratch("hash_cache");
+        let cache_path = root.join("hashes.bin");
+        let file = root.join("a.bin");
+        write(&file, "original");
+
+        let cache = ContentHashCache::load(&cache_path);
+        let (size, mtime) = stat_key(&file).unwrap();
+        let first = cache.hash_of(&file, size, mtime).unwrap();
+        cache.save(&cache_path);
+        assert!(cache_path.exists());
+
+        // Same file, fresh cache loaded from disk: same answer, served from
+        // the cache rather than re-read.
+        let reloaded = ContentHashCache::load(&cache_path);
+        assert_eq!(reloaded.loaded.len(), 1);
+        assert_eq!(reloaded.hash_of(&file, size, mtime), Some(first));
+
+        // Different content at the same length - the stale entry must not be
+        // reused just because the path matches.
+        write(&file, "OVERWROTE");
+        let (size2, mtime2) = stat_key(&file).unwrap();
+        let second = reloaded.hash_of(&file, size2, mtime2).unwrap();
+        assert_ne!(first, second);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_hash_cache_from_an_older_version_is_discarded() {
+        let root = scratch("hash_cache_ver");
+        let cache_path = root.join("hashes.bin");
+        let stale = HashCacheFile { version: HASH_CACHE_VERSION + 1, entries: HashMap::new() };
+        fs::write(&cache_path, bincode::serialize(&stale).unwrap()).unwrap();
+        assert!(ContentHashCache::load(&cache_path).loaded.is_empty());
+
+        fs::write(&cache_path, b"garbage").unwrap();
+        assert!(ContentHashCache::load(&cache_path).loaded.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hash_file_agrees_with_content_and_survives_an_empty_file() {
+        let root = scratch("hash_file");
+        write(&root.join("a.bin"), "abc");
+        write(&root.join("b.bin"), "abc");
+        write(&root.join("c.bin"), "abd");
+        write(&root.join("empty.bin"), "");
+
+        assert_eq!(hash_file(&root.join("a.bin")), hash_file(&root.join("b.bin")));
+        assert_ne!(hash_file(&root.join("a.bin")), hash_file(&root.join("c.bin")));
+        assert!(hash_file(&root.join("empty.bin")).is_some());
+        assert!(hash_file(&root.join("missing.bin")).is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("frs_{}_{}", name, std::process::id()));
